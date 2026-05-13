@@ -7,6 +7,7 @@ members = [
     "crates/roxy-cache",
     "crates/roxy-cache-fs",
     "crates/roxy-config",
+    "crates/roxy-impersonate",
 ]
 
 [workspace.package]
@@ -56,11 +57,17 @@ url = "2.5"
 shellexpand = "3.1"
 dirs = "5"
 
+# tls / http fingerprint emulation
+# `stream` enables Response::bytes_stream() for the Task 4 body adapter.
+wreq = { version = "6.0.0-rc.28", features = ["stream"] }
+wreq-util = "3.0.0-rc.10"
+
 # internal
 roxy-cache = { path = "crates/roxy-cache" }
 roxy-cache-fs = { path = "crates/roxy-cache-fs" }
 roxy-config = { path = "crates/roxy-config" }
 roxy-http = { path = "crates/roxy-http" }
+roxy-impersonate = { path = "crates/roxy-impersonate" }
 roxy-mitm = { path = "crates/roxy-mitm" }
 
 [workspace.lints.clippy]
