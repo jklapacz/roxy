@@ -16,6 +16,9 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+test-utils = ["roxy-impersonate/test-utils"]
+
 [dependencies]
 roxy-cache = { workspace = true }
 roxy-cache-fs = { workspace = true }
@@ -51,3 +54,4 @@ rcgen = { workspace = true }
 roxy-config = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde_json = { workspace = true }
+roxy-proxy = { path = ".", features = ["test-utils"] }
