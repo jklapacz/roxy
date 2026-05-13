@@ -1971,6 +1971,7 @@ dependencies = [
  "roxy-mitm",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",
