@@ -16,6 +16,10 @@
   env = {
     RUST_LOG = "debug";
     RUST_BACKTRACE = "1";
+  } // lib.optionalAttrs pkgs.stdenv.isDarwin {
+    # /opt/local/bin/ar (MacPorts) shadows a working ar on this host and breaks
+    # cc-rs invocations for native crates (aws-lc-sys, ring, rusqlite/bundled).
+    AR = "${pkgs.cctools}/bin/ar";
   };
 
   pre-commit.hooks = {
