@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired up in Tasks 11-13
-
 use rusqlite::Connection;
 use std::path::Path;
 
