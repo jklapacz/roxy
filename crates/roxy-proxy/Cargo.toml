@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+name = "roxy_proxy_lib"
+path = "src/lib.rs"
+
 [[bin]]
 name = "roxy"
 path = "src/main.rs"
@@ -41,4 +45,6 @@ axum = { version = "0.7", features = ["http2"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tempfile = "3.13"
 rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 rcgen = { workspace = true }
+roxy-config = { workspace = true }

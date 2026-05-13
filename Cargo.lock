@@ -1654,6 +1654,7 @@ dependencies = [
  "roxy-http",
  "roxy-mitm",
  "rustls",
+ "rustls-pki-types",
  "tempfile",
  "tokio",
  "tokio-rustls",

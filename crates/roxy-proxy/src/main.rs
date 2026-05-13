@@ -1,10 +1,6 @@
-mod ca_cmd;
-mod cli;
-mod handler;
-mod serve;
-
 use clap::Parser;
-use cli::{CaAction, Cli, Command};
+use roxy_proxy_lib::cli::{CaAction, Cli, Command};
+use roxy_proxy_lib::{ca_cmd, serve};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
