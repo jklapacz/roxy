@@ -1,10 +1,14 @@
+use bytes::Bytes;
 use http::{Request, Response};
+use http_body::{Body, Frame};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Empty};
-use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
+use pin_project_lite::pin_project;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -12,6 +16,52 @@ use thiserror::Error;
 /// `http_body::Body` so callers can forward arbitrary request bodies (e.g.
 /// streamed POSTs) through the upstream pool.
 pub type ClientBody = BoxBody<bytes::Bytes, std::io::Error>;
+
+pin_project! {
+    /// Body type emitted by all upstream client variants. The handler's tee_pump
+    /// is generic over `http_body::Body`, so any future variant added here just
+    /// needs to implement `Body<Data=Bytes, Error=io::Error>` and forward
+    /// poll_frame.
+    #[project = UpstreamBodyProj]
+    pub enum UpstreamBody {
+        Hyper { #[pin] inner: hyper::body::Incoming },
+        // Impersonate variant added in Task 4.
+    }
+}
+
+impl UpstreamBody {
+    pub fn hyper(inner: hyper::body::Incoming) -> Self {
+        Self::Hyper { inner }
+    }
+}
+
+impl Body for UpstreamBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        match self.project() {
+            UpstreamBodyProj::Hyper { inner } => {
+                inner.poll_frame(cx).map_err(std::io::Error::other)
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            UpstreamBody::Hyper { inner } => inner.is_end_stream(),
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        match self {
+            UpstreamBody::Hyper { inner } => inner.size_hint(),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum UpstreamError {
@@ -56,8 +106,10 @@ impl UpstreamClient {
     pub async fn send(
         &self,
         req: Request<ClientBody>,
-    ) -> Result<Response<Incoming>, UpstreamError> {
-        Ok(self.inner.request(req).await?)
+    ) -> Result<Response<UpstreamBody>, UpstreamError> {
+        let resp = self.inner.request(req).await?;
+        let (parts, body) = resp.into_parts();
+        Ok(Response::from_parts(parts, UpstreamBody::hyper(body)))
     }
 
     /// Send a request with an empty body. Internally converts to a [`ClientBody`]
@@ -65,10 +117,12 @@ impl UpstreamClient {
     pub async fn send_empty(
         &self,
         req: Request<Empty<bytes::Bytes>>,
-    ) -> Result<Response<Incoming>, UpstreamError> {
+    ) -> Result<Response<UpstreamBody>, UpstreamError> {
         let (parts, body) = req.into_parts();
         let body: ClientBody = body.map_err(|never| match never {}).boxed();
         let req = Request::from_parts(parts, body);
-        Ok(self.inner.request(req).await?)
+        let resp = self.inner.request(req).await?;
+        let (parts, body) = resp.into_parts();
+        Ok(Response::from_parts(parts, UpstreamBody::hyper(body)))
     }
 }

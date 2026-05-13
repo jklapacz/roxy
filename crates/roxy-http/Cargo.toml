@@ -24,6 +24,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+pin-project-lite = { workspace = true }
 
 [dev-dependencies]
 axum = { version = "0.7", features = ["http2"] }

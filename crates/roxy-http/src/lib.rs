@@ -7,4 +7,4 @@ pub mod upstream;
 
 pub use accept::{ConnHandler, Handler};
 pub use server::{serve_tls, BoxBody};
-pub use upstream::{ClientBody, UpstreamClient};
+pub use upstream::{ClientBody, UpstreamBody, UpstreamClient};

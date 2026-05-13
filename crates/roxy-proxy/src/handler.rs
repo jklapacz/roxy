@@ -2,7 +2,6 @@ use bytes::Bytes;
 use futures::TryStreamExt;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::Incoming;
 use roxy_cache::{Cache, CacheKey, CacheWriter};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -26,7 +25,7 @@ impl<C: Cache + 'static> Handler<C> {
     pub async fn handle(
         &self,
         authority: String,
-        mut req: Request<Incoming>,
+        mut req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody>, Infallible> {
         let key = CacheKey::from_request(&req, "_default", "https", &authority);
         if let Ok(Some(hit)) = self.cache.lookup(&key).await {
@@ -101,16 +100,18 @@ fn stream_to_body(rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>
     StreamBody::new(stream).boxed_unsync()
 }
 
-async fn tee_pump(
-    mut upstream: Incoming,
+async fn tee_pump<B>(
+    mut upstream: B,
     mut writer: Option<Box<dyn CacheWriter>>,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     disconnect_cap: u64,
-) {
+) where
+    B: http_body::Body<Data = Bytes, Error = std::io::Error> + Unpin,
+{
     use tokio::io::AsyncWriteExt;
     let mut client_alive = true;
     let mut bytes_past_disconnect = 0u64;
-    while let Some(frame) = upstream.frame().await {
+    while let Some(frame) = http_body_util::BodyExt::frame(&mut upstream).await {
         let frame = match frame {
             Ok(f) => f,
             Err(e) => {
