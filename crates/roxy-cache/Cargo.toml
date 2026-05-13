@@ -9,6 +9,13 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+url = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
