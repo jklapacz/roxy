@@ -1,7 +1,5 @@
 use std::fmt;
 
-use http::Request;
-
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey(Vec<u8>);
 
@@ -40,28 +38,6 @@ impl CacheKey {
         buf.push(b'\n');
         buf.extend_from_slice(sorted_query.as_bytes());
         Self(buf)
-    }
-
-    pub fn from_request<B>(
-        req: &Request<B>,
-        profile: &str,
-        default_scheme: &str,
-        default_host: &str,
-    ) -> Self {
-        let method = req.method().as_str();
-        let uri = req.uri();
-        let scheme = uri.scheme_str().unwrap_or(default_scheme);
-        let host = uri
-            .host()
-            .or_else(|| {
-                req.headers()
-                    .get(http::header::HOST)
-                    .and_then(|h| h.to_str().ok())
-            })
-            .unwrap_or(default_host);
-        let path = uri.path();
-        let query = uri.query();
-        Self::from_parts(profile, method, scheme, host, path, query)
     }
 }
 
@@ -107,17 +83,6 @@ mod tests {
         let a = CacheKey::from_parts("p", "GET", "https", "a.b", "/x", None);
         let b = CacheKey::from_parts("p", "GET", "https", "a.b", "/x", Some(""));
         assert_eq!(a, b);
-    }
-
-    #[test]
-    fn from_request_picks_authority_from_uri() {
-        let r = http::Request::get("https://example.com/api?b=2&a=1")
-            .body(())
-            .unwrap();
-        let k = CacheKey::from_request(&r, "p", "http", "fallback");
-        let expected =
-            CacheKey::from_parts("p", "GET", "https", "example.com", "/api", Some("a=1&b=2"));
-        assert_eq!(k, expected);
     }
 
     #[test]
