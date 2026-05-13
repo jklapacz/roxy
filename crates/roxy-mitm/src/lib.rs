@@ -2,6 +2,8 @@
 
 pub mod ca;
 pub mod leaf;
+pub mod resolver;
 
 pub use ca::{Ca, CaError};
 pub use leaf::LeafSigner;
+pub use resolver::SniResolver;
