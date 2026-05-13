@@ -1,1 +1,5 @@
-//! See workspace README and design spec.
+#![cfg_attr(test, allow(clippy::unwrap_used))]
+
+pub mod ca;
+
+pub use ca::{Ca, CaError};
