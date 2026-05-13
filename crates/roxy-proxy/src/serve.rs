@@ -80,10 +80,30 @@ pub async fn run(
 fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::ImpersonateClient>> {
     let customs = roxy_impersonate::CustomProfile::load_dir(&cfg.impersonate.profiles_dir)
         .context("load custom profiles")?;
-    if cfg.impersonate.default_profile.is_none() && customs.is_empty() {
+    // Integration-test hook: when `ROXY_TEST_EXTRA_ROOT_PEM_PATH` is set,
+    // build the impersonate client with that PEM as its TLS root store. This
+    // lets the in-process test fixture (whose fake origin is signed by a
+    // test CA) drive the wreq path end-to-end without depending on a public
+    // endpoint. Production roxy never sets this env var.
+    //
+    // The env var also forces the impersonate client to be built even when
+    // no default_profile / customs are configured — tests can then exercise
+    // builtin profiles via the explicit X-Roxy-Fingerprint header.
+    let test_root_pem = std::env::var("ROXY_TEST_EXTRA_ROOT_PEM_PATH")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if cfg.impersonate.default_profile.is_none() && customs.is_empty() && test_root_pem.is_none() {
         return Ok(None);
     }
-    let client = roxy_impersonate::ImpersonateClient::with_custom(customs);
+    let client = match test_root_pem {
+        Some(path) => {
+            let pem = std::fs::read(&path)
+                .with_context(|| format!("ROXY_TEST_EXTRA_ROOT_PEM_PATH={path}"))?;
+            roxy_impersonate::ImpersonateClient::with_custom_and_extra_root_pem(customs, &pem)
+                .context("impersonate client with extra root PEM")?
+        }
+        None => roxy_impersonate::ImpersonateClient::with_custom(customs),
+    };
     if let Some(name) = &cfg.impersonate.default_profile {
         if !client.has_profile(name) {
             let avail = client.profile_names().join(", ");

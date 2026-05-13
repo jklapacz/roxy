@@ -23,6 +23,15 @@ pub struct ImpersonateClient {
     /// builtin entry under the same name.
     custom: HashMap<String, wreq::Emulation>,
     clients: Arc<RwLock<HashMap<String, wreq::Client>>>,
+    /// Optional certificate store applied to every lazily-built `wreq::Client`.
+    ///
+    /// Defaults to `None`, meaning wreq uses its own default trust store (the
+    /// webpki roots when the `webpki-roots` feature is enabled). When set, the
+    /// supplied store fully replaces wreq's default. Constructed via
+    /// [`Self::with_custom_and_extra_root_pem`] for the integration-test
+    /// scenario where the upstream is signed by a private (test) CA that
+    /// is not in webpki-roots.
+    cert_store: Option<wreq::tls::CertStore>,
 }
 
 impl Default for ImpersonateClient {
@@ -42,6 +51,39 @@ impl ImpersonateClient {
     /// logged. Collisions within the custom set itself keep the first one and
     /// log a warning for subsequent duplicates.
     pub fn with_custom(customs: Vec<CustomProfile>) -> Self {
+        Self::build(customs, None)
+    }
+
+    /// Like [`Self::with_custom`] but installs an explicit TLS trust store
+    /// from the supplied PEM-encoded root certificate(s). The supplied store
+    /// REPLACES wreq's default trust (webpki-roots), so callers must include
+    /// every CA they need to verify upstream peers.
+    ///
+    /// Intended primarily for integration tests that need to talk to a fake
+    /// origin signed by a private CA — wreq's `webpki-roots` default trust
+    /// store does not consult `SSL_CERT_FILE`, so test code must supply the
+    /// test CA explicitly. Production callers wanting "webpki + extras"
+    /// must concatenate the public root PEMs with their internal root PEM
+    /// in `extra_root_pem`.
+    pub fn with_custom_and_extra_root_pem(
+        customs: Vec<CustomProfile>,
+        extra_root_pem: &[u8],
+    ) -> Result<Self, ImpersonateError> {
+        // Build a cert store containing ONLY the supplied PEM root(s). The
+        // resulting store replaces wreq's default webpki trust — that is
+        // acceptable for integration tests where the wreq client only talks
+        // to a fake origin signed by the supplied CA. Production callers
+        // wanting "webpki + extras" must instead pass a PEM stack that
+        // includes both the public CAs they care about and their internal
+        // root(s).
+        let store = wreq::tls::CertStore::builder()
+            .add_stack_pem_certs(extra_root_pem)
+            .build()
+            .map_err(ImpersonateError::Wreq)?;
+        Ok(Self::build(customs, Some(store)))
+    }
+
+    fn build(customs: Vec<CustomProfile>, cert_store: Option<wreq::tls::CertStore>) -> Self {
         let mut builtin = HashMap::new();
         for p in Profile::all() {
             builtin.insert(p.name().to_string(), *p);
@@ -71,6 +113,7 @@ impl ImpersonateClient {
             builtin,
             custom,
             clients: Arc::new(RwLock::new(HashMap::new())),
+            cert_store,
         }
     }
 
@@ -114,15 +157,19 @@ impl ImpersonateClient {
         }
         // Builtins take precedence on lookup (matching the collision rule),
         // then customs.
-        let client = if let Some(p) = self.builtin.get(label).copied() {
-            wreq::Client::builder().emulation(p.emulation()).build()?
+        let mut builder = if let Some(p) = self.builtin.get(label).copied() {
+            wreq::Client::builder().emulation(p.emulation())
         } else if let Some(emu) = self.custom.get(label) {
-            wreq::Client::builder().emulation(emu.clone()).build()?
+            wreq::Client::builder().emulation(emu.clone())
         } else {
             // has_profile said yes; the maps say no. Should be unreachable,
             // but treat it as an unknown label rather than panicking.
             return Err(ImpersonateError::UnknownFingerprint(label.to_string()));
         };
+        if let Some(store) = &self.cert_store {
+            builder = builder.cert_store(store.clone());
+        }
+        let client = builder.build()?;
         w.insert(label.to_string(), client.clone());
         Ok(client)
     }

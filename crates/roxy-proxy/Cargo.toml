@@ -49,3 +49,4 @@ rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 rcgen = { workspace = true }
 roxy-config = { workspace = true }
+tracing-subscriber = { workspace = true }
