@@ -1,0 +1,40 @@
+[package]
+name = "roxy-proxy"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "roxy"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+roxy-cache = { workspace = true }
+roxy-cache-fs = { workspace = true }
+roxy-config = { workspace = true }
+roxy-http = { workspace = true }
+roxy-mitm = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+axum = { version = "0.7", features = ["http2"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tempfile = "3.13"
+rustls = { workspace = true }
+rcgen = { workspace = true }
