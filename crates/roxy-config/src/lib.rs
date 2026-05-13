@@ -42,8 +42,13 @@ pub struct ImpersonateConfig {
     /// Optional. If set, every upstream request without an explicit override
     /// uses this profile. Absent => unfingerprinted (rustls path).
     pub default_profile: Option<String>,
-    /// Optional. Directory of *.toml custom profile specs. Defaults to
-    /// "./profiles".
+    /// Directory of `*.toml` custom profile specs.
+    ///
+    /// Defaults to `./profiles`, **relative to the current working directory**
+    /// of the running roxy process (NOT to the config file's directory).
+    /// Override via TOML to use an absolute path or an XDG path like
+    /// `~/.config/roxy/profiles`. Path expansion (`~`, env vars) is applied
+    /// the same way as `cache.dir` and `ca.dir`.
     pub profiles_dir: PathBuf,
     /// Strip the X-Roxy-Fingerprint header before forwarding upstream.
     pub strip_header: bool,
@@ -187,5 +192,6 @@ mod tests {
         let c = load_from_path(f.path()).unwrap();
         assert_eq!(c.impersonate.default_profile.as_deref(), Some("chrome-137"));
         assert!(!c.impersonate.strip_header);
+        assert_eq!(c.impersonate.profiles_dir, PathBuf::from("./profiles"));
     }
 }

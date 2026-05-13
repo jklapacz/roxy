@@ -65,6 +65,18 @@ pub async fn run(
         .map_err(Into::into)
 }
 
+/// Construct the optional `ImpersonateClient` based on config.
+///
+/// Returns `None` when there is no configured default profile AND no custom
+/// profiles are present in `profiles_dir`. This preserves the zero-overhead
+/// promise: a roxy without `[impersonate]` configured does not build a wreq
+/// client at all, so unfingerprinted upstream calls take the rustls path
+/// with bit-identical behavior to pre-Task-6 roxy.
+///
+/// When a default profile is configured, this also verifies the name exists
+/// in the registered set (builtins + customs), bailing fast with a listing
+/// of available profiles so operators see misconfiguration at startup, not
+/// at first request.
 fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::ImpersonateClient>> {
     let customs = roxy_impersonate::CustomProfile::load_dir(&cfg.impersonate.profiles_dir)
         .context("load custom profiles")?;
