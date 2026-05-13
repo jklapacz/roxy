@@ -4,6 +4,7 @@ pub mod ca;
 pub mod leaf;
 pub mod resolver;
 pub mod terminator;
+pub mod trust;
 
 pub use ca::{Ca, CaError};
 pub use leaf::LeafSigner;
