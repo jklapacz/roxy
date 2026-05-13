@@ -25,11 +25,16 @@ pub struct Fixture {
 }
 
 pub async fn spawn_fixture(default_ttl_seconds: u64) -> Fixture {
+    // rustls 0.23 requires a process-global CryptoProvider when multiple are in
+    // the dep graph. Install one for the test (idempotent / ignore if already
+    // installed by another component).
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let tmp = tempfile::tempdir().unwrap();
 
     // origin
     let origin_ca = Arc::new(TestCa::new());
-    let (leaf_cert, leaf_key) = origin_ca.mint("origin.local");
+    let (leaf_cert, leaf_key) = origin_ca.mint("localhost");
     let key_bytes = match &leaf_key {
         PrivateKeyDer::Pkcs8(k) => k.secret_pkcs8_der().to_vec(),
         PrivateKeyDer::Pkcs1(k) => k.secret_pkcs1_der().to_vec(),
@@ -42,17 +47,11 @@ pub async fn spawn_fixture(default_ttl_seconds: u64) -> Fixture {
     let app = Router::new()
         .route(
             "/echo/:msg",
-            get(
-                |axum::extract::Path(msg): axum::extract::Path<String>| async move { msg },
-            ),
+            get(|axum::extract::Path(msg): axum::extract::Path<String>| async move { msg }),
         )
         .route(
             "/big/:n",
-            get(
-                |axum::extract::Path(n): axum::extract::Path<usize>| async move {
-                    "x".repeat(n)
-                },
-            ),
+            get(|axum::extract::Path(n): axum::extract::Path<usize>| async move { "x".repeat(n) }),
         )
         .route(
             "/boom",
@@ -66,6 +65,16 @@ pub async fn spawn_fixture(default_ttl_seconds: u64) -> Fixture {
             .await
             .unwrap();
     });
+
+    // Point rustls-native-certs at the origin CA so roxy's upstream client
+    // trusts the test origin. Must be set BEFORE roxy is spawned (the
+    // HttpsConnector reads roots when constructed).
+    let origin_ca_path = tmp.path().join("origin-ca.pem");
+    std::fs::write(&origin_ca_path, &origin_ca.cert_pem).unwrap();
+    // Env mutation must happen before any concurrent reader. We set it before
+    // spawning the roxy task; integration tests in `tests/` are compiled as
+    // separate binaries so this only affects the current test process.
+    std::env::set_var("SSL_CERT_FILE", &origin_ca_path);
 
     // roxy: bind a TcpListener so we know the port, then run
     let roxy_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -94,9 +103,7 @@ level = "warn"
     let ca_dir = roxy_cfg.ca.dir.clone();
     let cfg_path_for_task = cfg_path.clone();
     let roxy_handle =
-        tokio::spawn(
-            async move { roxy_proxy_lib::serve::run(Some(&cfg_path_for_task)).await },
-        );
+        tokio::spawn(async move { roxy_proxy_lib::serve::run(Some(&cfg_path_for_task)).await });
     // wait until listener is up
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(roxy_addr).await.is_ok() {
@@ -109,7 +116,7 @@ level = "warn"
     Fixture {
         roxy_addr,
         origin_addr,
-        origin_host: format!("origin.local:{}", origin_addr.port()),
+        origin_host: format!("localhost:{}", origin_addr.port()),
         roxy_ca_pem,
         origin_ca,
         _origin_handle: origin_handle,
