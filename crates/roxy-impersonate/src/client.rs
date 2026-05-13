@@ -21,7 +21,7 @@ pub struct ImpersonateClient {
     /// Custom profiles loaded from TOML. On collision with a builtin the
     /// builtin wins, so anything in this map is guaranteed to NOT have a
     /// builtin entry under the same name.
-    pub(crate) custom: HashMap<String, wreq::Emulation>,
+    custom: HashMap<String, wreq::Emulation>,
     clients: Arc<RwLock<HashMap<String, wreq::Client>>>,
 }
 
@@ -52,6 +52,7 @@ impl ImpersonateClient {
             if builtin.contains_key(&name) {
                 tracing::warn!(
                     profile = %name,
+                    source = ?c.source_path,
                     "custom profile collides with builtin; builtin wins"
                 );
                 continue;
@@ -59,6 +60,7 @@ impl ImpersonateClient {
             if custom.contains_key(&name) {
                 tracing::warn!(
                     profile = %name,
+                    source = ?c.source_path,
                     "duplicate custom profile name; keeping the first"
                 );
                 continue;
@@ -205,15 +207,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collision_logs_warning_builtin_wins() {
+    async fn collision_skips_custom_keeps_builtin() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("chrome-137.toml");
         std::fs::write(&p, tests_helper::COLLIDING_SPEC).unwrap();
         let customs = crate::CustomProfile::load_dir(dir.path()).unwrap();
+        assert_eq!(customs.len(), 1);
         let client = ImpersonateClient::with_custom(customs);
+        // Profile name still resolves (the builtin is still registered).
         assert!(client.has_profile("chrome-137"));
-        // Builtin wins: custom map does NOT contain chrome-137.
-        assert!(!client.custom.contains_key("chrome-137"));
+        // No new profiles were added on top of the builtins — the colliding
+        // custom must have been skipped. We assert via the public surface
+        // (profile_names) rather than touching internal fields.
+        assert_eq!(
+            client.profile_names().len(),
+            crate::profile::Profile::all().len()
+        );
     }
 }
 

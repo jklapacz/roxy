@@ -17,9 +17,10 @@
 //!   constants (e.g. `"server_name"`, `"supported_groups"`). Translated to
 //!   typed `wreq::tls::ExtensionType` values here.
 //! - `tls.supported_versions`: dotted SemVer-ish strings — `"TLS1.3"`, `"TLS1.2"`,
-//!   `"TLS1.1"`, `"TLS1.0"`. The ORDERED list is interpreted by selecting the
-//!   max as the upper bound and the min as the lower bound; wreq does not
-//!   accept an ordered version list directly.
+//!   `"TLS1.1"`, `"TLS1.0"`. The ORDERED list is informational; only the min
+//!   and max of this list are honored by wreq, and the load-time log confirms
+//!   the resolved bounds. wreq does not accept an ordered version list
+//!   directly.
 //! - `tls.signature_algorithms`: lowercase IETF names (e.g.
 //!   `"ecdsa_secp256r1_sha256"`). Joined into a colon-separated string for
 //!   wreq's `sigalgs_list` builder.
@@ -30,7 +31,9 @@
 //! - `http2.header_order`: HTTP/2 pseudo-header names prefixed with `:`
 //!   (e.g. `":method"`, `":authority"`, `":scheme"`, `":path"`). Translated
 //!   to `wreq::http2::PseudoId`. Non-pseudo header names are not part of the
-//!   HTTP/2 pseudo-header order and are silently ignored.
+//!   HTTP/2 pseudo-header order and are dropped with a per-entry warning so
+//!   operators copying header orders from packet captures see what was
+//!   discarded.
 
 use crate::error::ImpersonateError;
 use serde::Deserialize;
@@ -74,6 +77,10 @@ pub struct Http2Spec {
 pub struct CustomProfile {
     pub spec: CustomProfileSpec,
     pub emulation: wreq::Emulation,
+    /// Path the spec was loaded from, when applicable. `None` for
+    /// programmatic construction (no file source); always `Some(...)` for
+    /// profiles produced by `CustomProfile::load`/`load_dir`.
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 impl CustomProfile {
@@ -98,7 +105,11 @@ impl CustomProfile {
             path: path.to_path_buf(),
             source: e,
         })?;
-        Ok(Self { spec, emulation })
+        Ok(Self {
+            spec,
+            emulation,
+            source_path: Some(path.to_path_buf()),
+        })
     }
 
     pub fn load_dir(dir: &Path) -> Result<Vec<CustomProfile>, ImpersonateError> {
@@ -178,6 +189,15 @@ fn build_emulation(spec: &CustomProfileSpec) -> Result<wreq::Emulation, anyhow::
         sorted.sort_by_key(by_rank);
         (sorted.first().copied(), sorted.last().copied())
     };
+    // Surface the resolved bounds so operators reading `supported_versions`
+    // can confirm what wreq actually applied (the ORDERED list is collapsed
+    // to min/max; order is informational only).
+    tracing::info!(
+        profile = %spec.name,
+        min = ?min_v,
+        max = ?max_v,
+        "custom profile: tls version bounds resolved from supported_versions"
+    );
 
     // Cipher list: BoringSSL parses a colon-separated mini-language string.
     // We hand the user-supplied IANA names through verbatim; BoringSSL accepts
@@ -213,15 +233,23 @@ fn build_emulation(spec: &CustomProfileSpec) -> Result<wreq::Emulation, anyhow::
     }
     let settings_order = settings_builder.build();
 
-    // HTTP/2 pseudo-header order: we ignore non-pseudo entries silently
-    // (they're not part of the pseudo-header frame ordering). If a TOML lists
-    // ONLY non-pseudo entries we error so the user gets feedback.
+    // HTTP/2 pseudo-header order: wreq only orders the pseudo-header block,
+    // so non-pseudo entries (e.g. `"user-agent"`) cannot participate. We
+    // warn-and-drop those per entry so operators copying header orders from
+    // packet captures see what was discarded. If a TOML lists ONLY non-pseudo
+    // entries we still error so the user gets a hard signal.
     let mut pseudo_builder = PseudoOrder::builder();
     let mut saw_pseudo = false;
-    for s in &spec.http2.header_order {
-        if let Some(id) = pseudo_from_str(s)? {
+    for entry in &spec.http2.header_order {
+        if let Some(id) = pseudo_from_str(entry)? {
             pseudo_builder = pseudo_builder.push(id);
             saw_pseudo = true;
+        } else {
+            tracing::warn!(
+                profile = %spec.name,
+                entry = %entry,
+                "custom profile: dropping non-pseudo header_order entry (wreq only supports pseudo-header ordering)",
+            );
         }
     }
     if !saw_pseudo {
@@ -329,7 +357,8 @@ fn setting_from_str(s: &str) -> Result<SettingId, anyhow::Error> {
 }
 
 /// `:method` → `PseudoId::Method`, etc. Non-pseudo (no `:` prefix) returns
-/// `Ok(None)` and is silently dropped from the pseudo-header order.
+/// `Ok(None)`; the caller is responsible for warning the operator that the
+/// entry was dropped (see `build_emulation`).
 fn pseudo_from_str(s: &str) -> Result<Option<PseudoId>, anyhow::Error> {
     if !s.starts_with(':') {
         return Ok(None);
