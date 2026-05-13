@@ -25,13 +25,16 @@ pin_project! {
     #[project = UpstreamBodyProj]
     pub enum UpstreamBody {
         Hyper { #[pin] inner: hyper::body::Incoming },
-        // Impersonate variant added in Task 4.
+        Impersonate { #[pin] inner: roxy_impersonate::ImpersonateBody },
     }
 }
 
 impl UpstreamBody {
     pub fn hyper(inner: hyper::body::Incoming) -> Self {
         Self::Hyper { inner }
+    }
+    pub fn impersonate(inner: roxy_impersonate::ImpersonateBody) -> Self {
+        Self::Impersonate { inner }
     }
 }
 
@@ -47,18 +50,21 @@ impl Body for UpstreamBody {
             UpstreamBodyProj::Hyper { inner } => {
                 inner.poll_frame(cx).map_err(std::io::Error::other)
             }
+            UpstreamBodyProj::Impersonate { inner } => inner.poll_frame(cx),
         }
     }
 
     fn is_end_stream(&self) -> bool {
         match self {
             UpstreamBody::Hyper { inner } => inner.is_end_stream(),
+            UpstreamBody::Impersonate { inner } => inner.is_end_stream(),
         }
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
         match self {
             UpstreamBody::Hyper { inner } => inner.size_hint(),
+            UpstreamBody::Impersonate { inner } => inner.size_hint(),
         }
     }
 }
