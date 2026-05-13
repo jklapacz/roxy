@@ -80,4 +80,30 @@ mod tests {
             Err(other) => panic!("expected UnknownFingerprint, got {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn default_label_routes_to_rustls() {
+        let rustls = UpstreamClient::new().unwrap();
+        let router = UpstreamRouter::new(rustls, None);
+        // 127.0.0.1:1 — no listener, dispatch reaches the rustls/hyper connector
+        // and errors with UpstreamError::Client. The key assertion is that we do
+        // NOT see UnknownFingerprint (which would indicate the routing decision
+        // went the wrong way).
+        let req = http::Request::get("http://127.0.0.1:1/")
+            .body(
+                http_body_util::Empty::<bytes::Bytes>::new()
+                    .map_err(|n| match n {})
+                    .boxed(),
+            )
+            .unwrap();
+        let err = router.send(DEFAULT_LABEL, req).await;
+        match err {
+            Err(UpstreamError::Client(_)) => {}
+            Err(UpstreamError::UnknownFingerprint(_)) => {
+                panic!("DEFAULT_LABEL should route to rustls, not produce UnknownFingerprint")
+            }
+            Err(other) => panic!("unexpected error variant: {other:?}"),
+            Ok(_) => panic!("expected client error, got Ok"),
+        }
+    }
 }

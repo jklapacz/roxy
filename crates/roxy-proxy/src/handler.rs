@@ -205,12 +205,7 @@ fn header_pairs(h: &http::HeaderMap) -> Vec<(String, Vec<u8>)> {
 }
 
 fn bad_gateway(msg: &'static str) -> Response<BoxBody> {
-    let body = Full::new(Bytes::from_static(msg.as_bytes()))
-        .map_err(|never| match never {})
-        .boxed_unsync();
-    let mut resp = http::Response::new(body);
-    *resp.status_mut() = StatusCode::BAD_GATEWAY;
-    resp
+    simple(StatusCode::BAD_GATEWAY, msg)
 }
 
 /// Construct a response from a cache hit. We construct via `Response::new` +
@@ -256,7 +251,10 @@ fn resolve_label(
         return Err(LabelError::MultipleHeaders);
     }
     let raw = match first {
-        Some(v) => v.to_str().unwrap_or("").trim(),
+        Some(v) => match v.to_str() {
+            Ok(s) => s.trim(),
+            Err(_) => return Err(LabelError::BadValue("<non-ascii>".to_string())),
+        },
         None => "",
     };
     if raw.is_empty() {
@@ -273,11 +271,15 @@ fn resolve_label(
 
 fn upstream_kind(e: &UpstreamError) -> &'static str {
     match e {
-        UpstreamError::UnknownFingerprint(_) => "unknown_profile",
-        UpstreamError::Impersonate(roxy_impersonate::ImpersonateError::Wreq(_)) => "impersonate",
-        UpstreamError::Impersonate(_) => "impersonate_other",
+        UpstreamError::Impersonate(roxy_impersonate::ImpersonateError::RequestBodyCollect(_)) => {
+            "impersonate_body_collect"
+        }
+        UpstreamError::Impersonate(_) => "impersonate",
         UpstreamError::Client(_) => "rustls_client",
         UpstreamError::Uri(_) => "uri",
+        UpstreamError::UnknownFingerprint(_) => {
+            unreachable!("handled directly in Handler::handle")
+        }
     }
 }
 
@@ -348,6 +350,18 @@ mod label_tests {
         let h = hdr(&["Chrome_137"]);
         match resolve_label(&h, None).unwrap_err() {
             LabelError::BadValue(v) => assert_eq!(v, "Chrome_137"),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_ascii_value_error() {
+        let mut h = HeaderMap::new();
+        let bytes: &[u8] = b"\xff\xfe";
+        let val = http::HeaderValue::from_bytes(bytes).unwrap();
+        h.append(FINGERPRINT_HEADER, val);
+        match resolve_label(&h, None).unwrap_err() {
+            LabelError::BadValue(v) => assert_eq!(v, "<non-ascii>"),
             other => panic!("got {other:?}"),
         }
     }
