@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "roxy",
+  "project_id": "b27bd471-36ee-4924-8ccf-1efaa0f2ae85"
+}
