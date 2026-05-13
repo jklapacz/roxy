@@ -53,21 +53,29 @@ impl ImpersonateClient {
 
     /// Returns the wreq::Client for the named profile, building it lazily.
     async fn client_for(&self, label: &str) -> Result<wreq::Client, ImpersonateError> {
+        // Fast path: already built.
         if let Some(c) = self.clients.read().await.get(label) {
             return Ok(c.clone());
         }
+        // Resolve which profile this label refers to before taking the write
+        // lock so unknown labels never hold the write guard.
         let profile = self
             .builtin
             .get(label)
             .copied()
             .ok_or_else(|| ImpersonateError::UnknownFingerprint(label.to_string()))?;
+        // Acquire write lock and double-check before building. If another task
+        // raced in and built the client between the read-lock drop and the
+        // write-lock acquisition, reuse its result instead of constructing a
+        // throwaway client.
+        let mut w = self.clients.write().await;
+        if let Some(c) = w.get(label) {
+            return Ok(c.clone());
+        }
         let client = wreq::Client::builder()
             .emulation(profile.emulation())
             .build()?;
-        self.clients
-            .write()
-            .await
-            .insert(label.to_string(), client.clone());
+        w.insert(label.to_string(), client.clone());
         Ok(client)
     }
 
@@ -92,10 +100,7 @@ impl ImpersonateClient {
         let body_bytes = body
             .collect()
             .await
-            .map_err(|e| ImpersonateError::CustomLoad {
-                path: std::path::PathBuf::from("<request body>"),
-                source: anyhow::anyhow!("collect request body: {e}"),
-            })?
+            .map_err(|e| ImpersonateError::RequestBodyCollect(anyhow::anyhow!("{e}")))?
             .to_bytes();
 
         let method = parts.method;

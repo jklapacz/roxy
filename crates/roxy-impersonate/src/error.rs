@@ -14,4 +14,7 @@ pub enum ImpersonateError {
         #[source]
         source: anyhow::Error,
     },
+
+    #[error("collect request body: {0}")]
+    RequestBodyCollect(#[source] anyhow::Error),
 }
