@@ -56,7 +56,7 @@ impl<C: Cache + 'static> Handler<C> {
         }
 
         // 3. Cache key includes the label.
-        let key = CacheKey::from_request(&req, &label, "https", &authority);
+        let key = build_cache_key_and_warn(&req, &label, &authority);
         if let Ok(Some(hit)) = self.cache.lookup(&key).await {
             return Ok(reply_from_cache(hit));
         }
@@ -269,6 +269,52 @@ fn resolve_label(
     Ok(raw.to_string())
 }
 
+fn client_authority<B>(req: &Request<B>) -> Option<String> {
+    if let Some(a) = req.uri().authority() {
+        return Some(a.as_str().to_string());
+    }
+    req.headers()
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
+fn authority_matches(connect: &str, client: &str) -> bool {
+    fn normalize(s: &str) -> String {
+        let lower = s.to_ascii_lowercase();
+        lower
+            .strip_suffix(":443")
+            .map(|s| s.to_string())
+            .unwrap_or(lower)
+    }
+    normalize(connect) == normalize(client)
+}
+
+fn build_cache_key_and_warn<B>(req: &Request<B>, label: &str, authority: &str) -> CacheKey {
+    let host_for_key = authority.to_ascii_lowercase();
+    let key = CacheKey::from_parts(
+        label,
+        req.method().as_str(),
+        "https",
+        &host_for_key,
+        req.uri().path(),
+        req.uri().query(),
+    );
+
+    if let Some(client_host) = client_authority(req) {
+        if !authority_matches(authority, &client_host) {
+            tracing::warn!(
+                connect_authority = %authority,
+                client_host = %client_host,
+                kind = "host_mismatch",
+                "client Host/URI authority disagrees with CONNECT authority; \
+                 keying by CONNECT authority"
+            );
+        }
+    }
+    key
+}
+
 fn upstream_kind(e: &UpstreamError) -> &'static str {
     match e {
         UpstreamError::Impersonate(roxy_impersonate::ImpersonateError::RequestBodyCollect(_)) => {
@@ -364,5 +410,107 @@ mod label_tests {
             LabelError::BadValue(v) => assert_eq!(v, "<non-ascii>"),
             other => panic!("got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+    use http::Request;
+    use roxy_cache::CacheKey;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn captured_warnings(f: impl FnOnce()) -> String {
+        let writer = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let data = writer.0.lock().unwrap().clone();
+        String::from_utf8(data).unwrap()
+    }
+
+    #[test]
+    fn cache_key_uses_connect_authority() {
+        let req = Request::get("/api")
+            .header(http::header::HOST, "attacker.com")
+            .body(())
+            .unwrap();
+        let key = build_cache_key_and_warn(&req, "p", "bank.com:443");
+        let expected = CacheKey::from_parts("p", "GET", "https", "bank.com:443", "/api", None);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn host_mismatch_emits_warning() {
+        let req = Request::get("/api")
+            .header(http::header::HOST, "attacker.com")
+            .body(())
+            .unwrap();
+        let output = captured_warnings(|| {
+            let _ = build_cache_key_and_warn(&req, "p", "bank.com:443");
+        });
+        assert!(
+            output.contains("kind=\"host_mismatch\""),
+            "expected host_mismatch warning, got: {output}"
+        );
+        assert!(
+            output.contains("connect_authority=bank.com:443"),
+            "expected connect_authority in warning, got: {output}"
+        );
+        assert!(
+            output.contains("client_host=attacker.com"),
+            "expected client_host in warning, got: {output}"
+        );
+    }
+
+    #[test]
+    fn matching_host_does_not_warn() {
+        let req = Request::get("/api")
+            .header(http::header::HOST, "bank.com")
+            .body(())
+            .unwrap();
+        let output = captured_warnings(|| {
+            let _ = build_cache_key_and_warn(&req, "p", "bank.com:443");
+        });
+        assert!(
+            !output.contains("host_mismatch"),
+            "expected no warning for matching host (default port stripped), got: {output}"
+        );
+    }
+
+    #[test]
+    fn absolute_form_uri_matching_connect_authority_does_not_warn() {
+        let req = Request::get("https://bank.com/api").body(()).unwrap();
+        let output = captured_warnings(|| {
+            let _ = build_cache_key_and_warn(&req, "p", "bank.com:443");
+        });
+        assert!(
+            !output.contains("host_mismatch"),
+            "expected no warning when absolute-form URI matches CONNECT authority (after default-port strip), got: {output}"
+        );
     }
 }
