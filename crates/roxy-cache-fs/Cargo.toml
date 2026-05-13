@@ -15,6 +15,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }

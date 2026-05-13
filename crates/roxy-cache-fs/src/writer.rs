@@ -160,9 +160,56 @@ impl CacheWriter for FsWriter {
 
 #[async_trait]
 impl Cache for FsCache {
-    async fn lookup(&self, _key: &CacheKey) -> Result<Option<CachedResponse>, CacheError> {
-        // implemented in next task
-        Ok(None)
+    async fn lookup(&self, key: &CacheKey) -> Result<Option<CachedResponse>, CacheError> {
+        use futures::StreamExt;
+        let row = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| CacheError::Backend("mutex".into()))?;
+            conn.query_row(
+                "SELECT content_hash, status, headers_json, created_at, ttl_seconds
+                 FROM entries WHERE key = ?1",
+                [key.as_bytes()],
+                |r| {
+                    let content_hash: Vec<u8> = r.get(0)?;
+                    let status: i64 = r.get(1)?;
+                    let headers_json: String = r.get(2)?;
+                    let created_at: i64 = r.get(3)?;
+                    let ttl_seconds: i64 = r.get(4)?;
+                    Ok((content_hash, status, headers_json, created_at, ttl_seconds))
+                },
+            )
+            .ok()
+        };
+        let Some((content_hash, status, headers_json, created_at, ttl_seconds)) = row else {
+            return Ok(None);
+        };
+        let hex = hex::encode(&content_hash);
+        let path = blob_path(&self.cache_dir, &hex);
+        let file = tokio::fs::File::open(&path).await.map_err(CacheError::Io)?;
+        let reader = tokio_util::io::ReaderStream::new(file);
+        let body: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> =
+            reader.boxed();
+
+        let headers: Vec<(String, Vec<u8>)> = serde_json::from_str(&headers_json)
+            .map_err(|e| CacheError::Corrupted(e.to_string()))?;
+
+        let created = SystemTime::UNIX_EPOCH + Duration::from_secs(created_at as u64);
+        let ttl = Duration::from_secs(ttl_seconds as u64);
+        let resp = CachedResponse {
+            meta: ResponseMeta {
+                status: status as u16,
+                headers,
+            },
+            body,
+            created_at: created,
+            ttl,
+        };
+        if resp.is_expired(SystemTime::now()) {
+            return Ok(None);
+        }
+        Ok(Some(resp))
     }
 
     async fn begin_store(
@@ -259,5 +306,67 @@ mod tests {
             .map(|rd| rd.count())
             .unwrap_or(0);
         assert_eq!(n, 0);
+    }
+
+    use futures::StreamExt;
+
+    async fn drain_body(
+        mut s: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>>,
+    ) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(chunk) = s.next().await {
+            out.extend_from_slice(&chunk.unwrap());
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn round_trip_store_then_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("GET", "https", "x.y", "/p", None);
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![("x".to_string(), b"y".to_vec())],
+                },
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+        w.write_all(b"payload").await.unwrap();
+        w.finish().await.unwrap();
+
+        let hit = cache.lookup(&key).await.unwrap().unwrap();
+        assert_eq!(hit.meta.status, 200);
+        assert_eq!(hit.meta.headers, vec![("x".to_string(), b"y".to_vec())]);
+        let bytes = drain_body(hit.body).await;
+        assert_eq!(bytes, b"payload");
+    }
+
+    #[tokio::test]
+    async fn ttl_zero_means_immediately_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("GET", "https", "x.y", "/p", None);
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![],
+                },
+                Duration::from_secs(0),
+            )
+            .await
+            .unwrap();
+        w.write_all(b"x").await.unwrap();
+        w.finish().await.unwrap();
+        // Sleep 1ms to guarantee elapsed > 0.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let hit = cache.lookup(&key).await.unwrap();
+        assert!(hit.is_none(), "expired entries must look like a miss");
     }
 }
