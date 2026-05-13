@@ -15,7 +15,12 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the proxy.
-    Serve,
+    Serve {
+        /// Override [impersonate].default_profile from config. Use "none" to
+        /// force the unfingerprinted (rustls) path.
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
     /// CA trust-store management.
     Ca {
         #[command(subcommand)]

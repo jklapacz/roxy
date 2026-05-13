@@ -103,7 +103,9 @@ level = "warn"
     let ca_dir = roxy_cfg.ca.dir.clone();
     let cfg_path_for_task = cfg_path.clone();
     let roxy_handle =
-        tokio::spawn(async move { roxy_proxy_lib::serve::run(Some(&cfg_path_for_task)).await });
+        tokio::spawn(
+            async move { roxy_proxy_lib::serve::run(Some(&cfg_path_for_task), None).await },
+        );
     // wait until listener is up
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(roxy_addr).await.is_ok() {

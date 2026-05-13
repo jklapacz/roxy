@@ -12,9 +12,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cmd = cli.command.unwrap_or(Command::Serve);
+    let cmd = cli.command.unwrap_or(Command::Serve { fingerprint: None });
     match cmd {
-        Command::Serve => serve::run(cli.config.as_deref()).await,
+        Command::Serve { fingerprint } => {
+            serve::run(cli.config.as_deref(), fingerprint.as_deref()).await
+        }
         Command::Ca { action } => match action {
             CaAction::Install { ca_dir, print_only } => ca_cmd::install(ca_dir, print_only),
             CaAction::Uninstall { ca_dir, print_only } => ca_cmd::uninstall(ca_dir, print_only),

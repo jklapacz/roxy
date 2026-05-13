@@ -18,8 +18,19 @@ const SNI_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(10_000) {
     None => NonZeroUsize::MIN,
 };
 
-pub async fn run(config_path: Option<&Path>) -> anyhow::Result<()> {
-    let cfg = load_config(config_path)?;
+pub async fn run(
+    config_path: Option<&Path>,
+    fingerprint_override: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut cfg = load_config(config_path)?;
+    if let Some(f) = fingerprint_override {
+        if f == roxy_impersonate::NONE_LABEL {
+            cfg.impersonate.default_profile = None;
+        } else {
+            cfg.impersonate.default_profile = Some(f.to_string());
+        }
+    }
+
     let cache = Arc::new(FsCache::open(&cfg.cache.dir).context("open cache")?);
     let evicted = cache.cleanup_tmp().context("cleanup tmp")?;
     if evicted > 0 {
@@ -34,13 +45,7 @@ pub async fn run(config_path: Option<&Path>) -> anyhow::Result<()> {
     let terminator = Terminator::new(resolver);
 
     let rustls = roxy_http::UpstreamClient::new().context("upstream client")?;
-
-    // Task 7 will plumb [impersonate] config; for now we always provide an
-    // ImpersonateClient with no custom profiles. Per-request X-Roxy-Fingerprint
-    // for builtin profiles works immediately. default_profile = None means
-    // requests without the header go through the rustls path.
-    let impersonate = Some(roxy_impersonate::ImpersonateClient::new());
-
+    let impersonate = build_impersonate(&cfg)?;
     let router = Arc::new(roxy_http::UpstreamRouter::new(rustls, impersonate));
 
     let handler = ProxyConnHandler {
@@ -48,8 +53,8 @@ pub async fn run(config_path: Option<&Path>) -> anyhow::Result<()> {
             cache: cache.clone(),
             default_ttl: Duration::from_secs(cfg.cache.default_ttl_seconds),
             router,
-            default_profile: None,
-            strip_fingerprint_header: true,
+            default_profile: cfg.impersonate.default_profile.clone(),
+            strip_fingerprint_header: cfg.impersonate.strip_header,
             disconnect_cap: 50 * 1024 * 1024,
         }),
     };
@@ -58,6 +63,22 @@ pub async fn run(config_path: Option<&Path>) -> anyhow::Result<()> {
     roxy_http::accept::run(cfg.listen, terminator, Arc::new(handler))
         .await
         .map_err(Into::into)
+}
+
+fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::ImpersonateClient>> {
+    let customs = roxy_impersonate::CustomProfile::load_dir(&cfg.impersonate.profiles_dir)
+        .context("load custom profiles")?;
+    if cfg.impersonate.default_profile.is_none() && customs.is_empty() {
+        return Ok(None);
+    }
+    let client = roxy_impersonate::ImpersonateClient::with_custom(customs);
+    if let Some(name) = &cfg.impersonate.default_profile {
+        if !client.has_profile(name) {
+            let avail = client.profile_names().join(", ");
+            anyhow::bail!("unknown default profile {name:?}; available: [{avail}]");
+        }
+    }
+    Ok(Some(client))
 }
 
 fn load_config(path: Option<&Path>) -> anyhow::Result<Config> {

@@ -14,6 +14,7 @@ pub struct Config {
     pub cache: CacheConfig,
     pub ca: CaConfig,
     pub log: LogConfig,
+    pub impersonate: ImpersonateConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -35,6 +36,29 @@ pub struct LogConfig {
     pub level: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ImpersonateConfig {
+    /// Optional. If set, every upstream request without an explicit override
+    /// uses this profile. Absent => unfingerprinted (rustls path).
+    pub default_profile: Option<String>,
+    /// Optional. Directory of *.toml custom profile specs. Defaults to
+    /// "./profiles".
+    pub profiles_dir: PathBuf,
+    /// Strip the X-Roxy-Fingerprint header before forwarding upstream.
+    pub strip_header: bool,
+}
+
+impl Default for ImpersonateConfig {
+    fn default() -> Self {
+        Self {
+            default_profile: None,
+            profiles_dir: PathBuf::from("./profiles"),
+            strip_header: true,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -42,6 +66,7 @@ impl Default for Config {
             cache: CacheConfig::default(),
             ca: CaConfig::default(),
             log: LogConfig::default(),
+            impersonate: ImpersonateConfig::default(),
         }
     }
 }
@@ -94,6 +119,7 @@ impl Config {
     pub fn with_expanded_paths(mut self) -> Result<Self, ConfigError> {
         self.cache.dir = expand(&self.cache.dir)?;
         self.ca.dir = expand(&self.ca.dir)?;
+        self.impersonate.profiles_dir = expand(&self.impersonate.profiles_dir)?;
         Ok(self)
     }
 }
@@ -142,5 +168,24 @@ mod tests {
     fn missing_file_returns_not_found() {
         let err = load_from_path(std::path::Path::new("/nonexistent/roxy.toml")).unwrap_err();
         assert!(matches!(err, ConfigError::NotFound(_)));
+    }
+
+    #[test]
+    fn impersonate_section_defaults() {
+        let c = Config::default();
+        assert_eq!(c.impersonate.default_profile, None);
+        assert_eq!(c.impersonate.profiles_dir, PathBuf::from("./profiles"));
+        assert!(c.impersonate.strip_header);
+    }
+
+    #[test]
+    fn impersonate_section_parses_from_toml() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"[impersonate]"#).unwrap();
+        writeln!(f, r#"default_profile = "chrome-137""#).unwrap();
+        writeln!(f, r#"strip_header = false"#).unwrap();
+        let c = load_from_path(f.path()).unwrap();
+        assert_eq!(c.impersonate.default_profile.as_deref(), Some("chrome-137"));
+        assert!(!c.impersonate.strip_header);
     }
 }
