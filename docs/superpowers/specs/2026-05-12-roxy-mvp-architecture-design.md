@@ -38,6 +38,7 @@ Future fingerprint-emulation work targets the same use case, but is sequenced af
 - Cache complete response bodies with a content-addressable layout.
 - Serve cached responses on subsequent identical requests within TTL.
 - Never panic, never serve a corrupted cache entry, never fail a request because the cache failed.
+- Provide a `roxy ca install` subcommand that installs the generated CA cert into the host trust store on macOS and Linux.
 
 ### Non-goals (MVP)
 
@@ -210,7 +211,8 @@ The streaming-writer shape makes tee-while-caching possible without forcing the 
 
 - Generated on first run if absent: 4096-bit RSA cert and key written to `<ca_dir>/roxy-ca.{crt,key}`.
 - Validity: 10 years.
-- The user must install `roxy-ca.crt` in their client's trust store. MVP prints the path and a short hint at startup. A `roxy ca install` helper command is a future affordance.
+- On first run (and any subsequent startup where the CA is not yet trusted), the binary prints the CA path and a one-line hint: `run 'roxy ca install' to add this CA to your system trust store`.
+- See §7.4 for the install subcommand.
 
 ### 7.2 Leaf certificates
 
@@ -225,6 +227,38 @@ The streaming-writer shape makes tee-while-caching possible without forcing the 
 3. Look up or mint a leaf cert for the SNI host.
 4. Run a rustls server handshake on the upgraded socket. ALPN: `h2,http/1.1`.
 5. Hyper serves the negotiated protocol on the decrypted byte stream.
+
+### 7.4 `roxy ca install` subcommand
+
+Installs the generated CA certificate into the host system trust store so client tools that use the system trust (curl, Go stdlib, rustls-via-system-roots, browsers that defer to the OS) accept Roxy-minted leaf certs without further configuration.
+
+**Synopsis:**
+
+```
+roxy ca install [--ca-dir <path>] [--print-only]
+roxy ca uninstall [--ca-dir <path>]
+```
+
+**Per-platform behavior:**
+
+| OS | Mechanism | Privilege |
+|---|---|---|
+| macOS | `security add-trusted-cert -d -r trustRoot -k <login-keychain> <ca-path>` | User keychain — no sudo needed if user runs the command. |
+| Linux | Copy CA to `/usr/local/share/ca-certificates/roxy-ca.crt`, run `update-ca-certificates` | Requires sudo. The subcommand detects non-root and prints the exact commands needed (does not invoke sudo itself). |
+| Windows | Not supported in MVP. The subcommand exits with a clear message pointing to manual `certutil` instructions. |
+
+**Detection of already-installed:** Before installing, the subcommand checks the trust store for an existing entry with the same fingerprint and short-circuits with a "already installed" message.
+
+**`--print-only`** prints the platform-specific shell command without executing it, useful for ops environments that prefer to run trust changes by hand.
+
+**Out of scope for MVP:**
+
+- Mozilla NSS / Firefox trust store (separate `cert9.db` per profile; can be a follow-up).
+- Python `certifi` bundle (lives inside the Python venv; users must point their HTTP client at the system store or splice the CA into certifi manually — documented in README, not solved by `ca install`).
+- Java `cacerts` keystore.
+- Windows trust stores (deferred).
+
+**Uninstall** is the inverse: remove the installed cert by fingerprint. Useful when rotating the CA.
 
 ## 8. Upstream client
 
@@ -280,7 +314,7 @@ Each of the below is acceptable for MVP and is a candidate follow-up spec.
 - No size cap on cached bodies; truly huge responses can fill disk.
 - No deduplication of concurrent identical misses; two simultaneous requests for the same key both fetch and race on cache write.
 - Sqlite single-writer constraint; under high concurrent miss volume, the index can become a bottleneck.
-- CA install is manual; no helper command.
+- `roxy ca install` covers macOS and Linux system trust stores only. Windows, Mozilla NSS / Firefox, Python `certifi`, and Java `cacerts` require manual steps.
 - No metrics, no admin endpoint.
 - No cache eviction or blob garbage collection; cache size grows monotonically until manually pruned.
 
@@ -295,5 +329,6 @@ Implementation will be tracked in beads. The natural order is:
 5. `roxy-http` upstream client (independent of the accept loop).
 6. Tee-while-caching response handling (depends on cache + http).
 7. `roxy-proxy` binary wire-up (depends on all above).
-8. Integration test harness.
-9. Smoke test.
+8. `roxy ca install` subcommand (depends on `roxy-mitm` and binary wire-up).
+9. Integration test harness.
+10. Smoke test.
