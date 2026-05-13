@@ -65,6 +65,11 @@ impl ImpersonateClient {
     /// test CA explicitly. Production callers wanting "webpki + extras"
     /// must concatenate the public root PEMs with their internal root PEM
     /// in `extra_root_pem`.
+    ///
+    /// Gated behind the `test-utils` Cargo feature (and `cfg(test)` for
+    /// internal unit tests) so this footgun is not present in production
+    /// binaries. Production callers should never need this constructor.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn with_custom_and_extra_root_pem(
         customs: Vec<CustomProfile>,
         extra_root_pem: &[u8],

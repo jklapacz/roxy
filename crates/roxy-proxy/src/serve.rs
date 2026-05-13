@@ -80,37 +80,46 @@ pub async fn run(
 fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::ImpersonateClient>> {
     let customs = roxy_impersonate::CustomProfile::load_dir(&cfg.impersonate.profiles_dir)
         .context("load custom profiles")?;
-    // Integration-test hook: when `ROXY_TEST_EXTRA_ROOT_PEM_PATH` is set,
-    // build the impersonate client with that PEM as its TLS root store. This
-    // lets the in-process test fixture (whose fake origin is signed by a
-    // test CA) drive the wreq path end-to-end without depending on a public
-    // endpoint. Production roxy never sets this env var.
-    //
-    // The env var also forces the impersonate client to be built even when
-    // no default_profile / customs are configured — tests can then exercise
-    // builtin profiles via the explicit X-Roxy-Fingerprint header.
-    let test_root_pem = std::env::var("ROXY_TEST_EXTRA_ROOT_PEM_PATH")
-        .ok()
-        .filter(|s| !s.is_empty());
-    if cfg.impersonate.default_profile.is_none() && customs.is_empty() && test_root_pem.is_none() {
+
+    // Test-only: ROXY_TEST_EXTRA_ROOT_PEM_PATH lets the integration test
+    // fixture inject a private CA so the impersonate client trusts the
+    // test fixture's fake origin. Both the env-var read and the unsafe
+    // constructor it calls are gated behind the `test-utils` feature so
+    // production builds cannot be tricked into swapping their trust
+    // store via a stray env var.
+    #[cfg(any(test, feature = "test-utils"))]
+    {
+        if let Some(pem_path) = std::env::var("ROXY_TEST_EXTRA_ROOT_PEM_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+        {
+            let pem = std::fs::read(&pem_path)
+                .with_context(|| format!("ROXY_TEST_EXTRA_ROOT_PEM_PATH={pem_path}"))?;
+            let client =
+                roxy_impersonate::ImpersonateClient::with_custom_and_extra_root_pem(customs, &pem)
+                    .context("impersonate client with extra root PEM")?;
+            return Ok(Some(verify_default_profile(client, cfg)?));
+        }
+    }
+
+    if cfg.impersonate.default_profile.is_none() && customs.is_empty() {
         return Ok(None);
     }
-    let client = match test_root_pem {
-        Some(path) => {
-            let pem = std::fs::read(&path)
-                .with_context(|| format!("ROXY_TEST_EXTRA_ROOT_PEM_PATH={path}"))?;
-            roxy_impersonate::ImpersonateClient::with_custom_and_extra_root_pem(customs, &pem)
-                .context("impersonate client with extra root PEM")?
-        }
-        None => roxy_impersonate::ImpersonateClient::with_custom(customs),
-    };
+    let client = roxy_impersonate::ImpersonateClient::with_custom(customs);
+    Ok(Some(verify_default_profile(client, cfg)?))
+}
+
+fn verify_default_profile(
+    client: roxy_impersonate::ImpersonateClient,
+    cfg: &Config,
+) -> anyhow::Result<roxy_impersonate::ImpersonateClient> {
     if let Some(name) = &cfg.impersonate.default_profile {
         if !client.has_profile(name) {
             let avail = client.profile_names().join(", ");
             anyhow::bail!("unknown default profile {name:?}; available: [{avail}]");
         }
     }
-    Ok(Some(client))
+    Ok(client)
 }
 
 fn load_config(path: Option<&Path>) -> anyhow::Result<Config> {
