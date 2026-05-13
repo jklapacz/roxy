@@ -248,7 +248,7 @@ mod tests {
     async fn store_writes_blob_and_indexes() {
         let dir = tempfile::tempdir().unwrap();
         let cache = FsCache::open(dir.path()).unwrap();
-        let key = CacheKey::from_parts("GET", "https", "x.y", "/p", None);
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
         let mut w = cache
             .begin_store(
                 &key,
@@ -283,7 +283,7 @@ mod tests {
     async fn abort_discards_tmp() {
         let dir = tempfile::tempdir().unwrap();
         let cache = FsCache::open(dir.path()).unwrap();
-        let key = CacheKey::from_parts("GET", "https", "x.y", "/p", None);
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
         let mut w = cache
             .begin_store(
                 &key,
@@ -324,7 +324,7 @@ mod tests {
     async fn round_trip_store_then_lookup() {
         let dir = tempfile::tempdir().unwrap();
         let cache = FsCache::open(dir.path()).unwrap();
-        let key = CacheKey::from_parts("GET", "https", "x.y", "/p", None);
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
         let mut w = cache
             .begin_store(
                 &key,
@@ -350,7 +350,7 @@ mod tests {
     async fn ttl_zero_means_immediately_expired() {
         let dir = tempfile::tempdir().unwrap();
         let cache = FsCache::open(dir.path()).unwrap();
-        let key = CacheKey::from_parts("GET", "https", "x.y", "/p", None);
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
         let mut w = cache
             .begin_store(
                 &key,

@@ -11,6 +11,7 @@ impl CacheKey {
     }
 
     pub fn from_parts(
+        profile: &str,
         method: &str,
         scheme: &str,
         host: &str,
@@ -19,8 +20,16 @@ impl CacheKey {
     ) -> Self {
         let sorted_query = query.map(sort_query).unwrap_or_default();
         let mut buf = Vec::with_capacity(
-            method.len() + scheme.len() + host.len() + path.len() + sorted_query.len() + 4,
+            profile.len()
+                + method.len()
+                + scheme.len()
+                + host.len()
+                + path.len()
+                + sorted_query.len()
+                + 5,
         );
+        buf.extend_from_slice(profile.as_bytes());
+        buf.push(b'\n');
         buf.extend_from_slice(method.to_ascii_uppercase().as_bytes());
         buf.push(b'\n');
         buf.extend_from_slice(scheme.to_ascii_lowercase().as_bytes());
@@ -33,7 +42,12 @@ impl CacheKey {
         Self(buf)
     }
 
-    pub fn from_request<B>(req: &Request<B>, default_scheme: &str, default_host: &str) -> Self {
+    pub fn from_request<B>(
+        req: &Request<B>,
+        profile: &str,
+        default_scheme: &str,
+        default_host: &str,
+    ) -> Self {
         let method = req.method().as_str();
         let uri = req.uri();
         let scheme = uri.scheme_str().unwrap_or(default_scheme);
@@ -47,7 +61,7 @@ impl CacheKey {
             .unwrap_or(default_host);
         let path = uri.path();
         let query = uri.query();
-        Self::from_parts(method, scheme, host, path, query)
+        Self::from_parts(profile, method, scheme, host, path, query)
     }
 }
 
@@ -69,29 +83,29 @@ mod tests {
 
     #[test]
     fn method_uppercased_scheme_host_lowercased() {
-        let a = CacheKey::from_parts("get", "HTTPS", "Example.COM", "/api", None);
-        let b = CacheKey::from_parts("GET", "https", "example.com", "/api", None);
+        let a = CacheKey::from_parts("p", "get", "HTTPS", "Example.COM", "/api", None);
+        let b = CacheKey::from_parts("p", "GET", "https", "example.com", "/api", None);
         assert_eq!(a, b);
     }
 
     #[test]
     fn query_params_sorted() {
-        let a = CacheKey::from_parts("GET", "https", "a.b", "/p", Some("z=2&a=1"));
-        let b = CacheKey::from_parts("GET", "https", "a.b", "/p", Some("a=1&z=2"));
+        let a = CacheKey::from_parts("p", "GET", "https", "a.b", "/p", Some("z=2&a=1"));
+        let b = CacheKey::from_parts("p", "GET", "https", "a.b", "/p", Some("a=1&z=2"));
         assert_eq!(a, b);
     }
 
     #[test]
     fn different_paths_differ() {
-        let a = CacheKey::from_parts("GET", "https", "a.b", "/x", None);
-        let b = CacheKey::from_parts("GET", "https", "a.b", "/y", None);
+        let a = CacheKey::from_parts("p", "GET", "https", "a.b", "/x", None);
+        let b = CacheKey::from_parts("p", "GET", "https", "a.b", "/y", None);
         assert_ne!(a, b);
     }
 
     #[test]
     fn empty_query_treated_as_absent() {
-        let a = CacheKey::from_parts("GET", "https", "a.b", "/x", None);
-        let b = CacheKey::from_parts("GET", "https", "a.b", "/x", Some(""));
+        let a = CacheKey::from_parts("p", "GET", "https", "a.b", "/x", None);
+        let b = CacheKey::from_parts("p", "GET", "https", "a.b", "/x", Some(""));
         assert_eq!(a, b);
     }
 
@@ -100,8 +114,23 @@ mod tests {
         let r = http::Request::get("https://example.com/api?b=2&a=1")
             .body(())
             .unwrap();
-        let k = CacheKey::from_request(&r, "http", "fallback");
-        let expected = CacheKey::from_parts("GET", "https", "example.com", "/api", Some("a=1&b=2"));
+        let k = CacheKey::from_request(&r, "p", "http", "fallback");
+        let expected =
+            CacheKey::from_parts("p", "GET", "https", "example.com", "/api", Some("a=1&b=2"));
         assert_eq!(k, expected);
+    }
+
+    #[test]
+    fn different_profiles_differ() {
+        let a = CacheKey::from_parts("chrome-137", "GET", "https", "a.b", "/x", None);
+        let b = CacheKey::from_parts("firefox-139", "GET", "https", "a.b", "/x", None);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn default_profile_label_is_distinct_from_named() {
+        let a = CacheKey::from_parts("_default", "GET", "https", "a.b", "/x", None);
+        let b = CacheKey::from_parts("chrome-137", "GET", "https", "a.b", "/x", None);
+        assert_ne!(a, b);
     }
 }

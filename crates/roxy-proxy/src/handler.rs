@@ -28,7 +28,7 @@ impl<C: Cache + 'static> Handler<C> {
         authority: String,
         mut req: Request<Incoming>,
     ) -> Result<Response<BoxBody>, Infallible> {
-        let key = CacheKey::from_request(&req, "https", &authority);
+        let key = CacheKey::from_request(&req, "_default", "https", &authority);
         if let Ok(Some(hit)) = self.cache.lookup(&key).await {
             return Ok(reply_from_cache(hit));
         }
