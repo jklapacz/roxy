@@ -3,6 +3,8 @@ use futures::TryStreamExt;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, StreamBody};
 use roxy_cache::{Cache, CacheKey, CacheWriter};
+use roxy_http::{UpstreamError, UpstreamRouter};
+use roxy_impersonate::{DEFAULT_LABEL, NONE_LABEL};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,9 +19,13 @@ pub type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Er
 pub struct Handler<C: Cache + 'static> {
     pub cache: Arc<C>,
     pub default_ttl: Duration,
-    pub upstream: roxy_http::UpstreamClient,
+    pub router: Arc<UpstreamRouter>,
+    pub default_profile: Option<String>,
+    pub strip_fingerprint_header: bool,
     pub disconnect_cap: u64,
 }
+
+pub const FINGERPRINT_HEADER: &str = "x-roxy-fingerprint";
 
 impl<C: Cache + 'static> Handler<C> {
     pub async fn handle(
@@ -27,12 +33,35 @@ impl<C: Cache + 'static> Handler<C> {
         authority: String,
         mut req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody>, Infallible> {
-        let key = CacheKey::from_request(&req, "_default", "https", &authority);
+        // 1. Resolve profile label.
+        let label = match resolve_label(req.headers(), self.default_profile.as_deref()) {
+            Ok(l) => l,
+            Err(LabelError::MultipleHeaders) => {
+                return Ok(simple(
+                    StatusCode::BAD_REQUEST,
+                    "roxy: X-Roxy-Fingerprint must be set at most once",
+                ));
+            }
+            Err(LabelError::BadValue(_)) => {
+                return Ok(simple(
+                    StatusCode::BAD_REQUEST,
+                    "roxy: X-Roxy-Fingerprint value must match ^[a-z0-9][a-z0-9-]*$",
+                ));
+            }
+        };
+
+        // 2. Strip header before forwarding upstream.
+        if self.strip_fingerprint_header {
+            req.headers_mut().remove(FINGERPRINT_HEADER);
+        }
+
+        // 3. Cache key includes the label.
+        let key = CacheKey::from_request(&req, &label, "https", &authority);
         if let Ok(Some(hit)) = self.cache.lookup(&key).await {
             return Ok(reply_from_cache(hit));
         }
 
-        // Rebuild the upstream URI (authority is from CONNECT, path comes from inner request).
+        // 4. Rebuild upstream URI (authority is from CONNECT, path comes from inner request).
         let scheme = req.uri().scheme_str().unwrap_or("https");
         let path_and_query = req
             .uri()
@@ -42,21 +71,26 @@ impl<C: Cache + 'static> Handler<C> {
         let upstream_uri: http::Uri =
             match format!("{scheme}://{authority}{path_and_query}").parse() {
                 Ok(u) => u,
-                Err(_) => return Ok(bad_gateway("bad upstream uri")),
+                Err(_) => return Ok(bad_gateway("roxy: bad upstream uri")),
             };
         *req.uri_mut() = upstream_uri;
         req.headers_mut().remove(http::header::HOST);
 
-        // Forward request body unchanged.
+        // 5. Forward via router.
         let (parts, body) = req.into_parts();
         let body: roxy_http::ClientBody = body.map_err(std::io::Error::other).boxed();
         let upstream_req = http::Request::from_parts(parts, body);
 
-        let resp = match self.upstream.send(upstream_req).await {
+        let resp = match self.router.send(&label, upstream_req).await {
             Ok(r) => r,
+            Err(UpstreamError::UnknownFingerprint(name)) => {
+                tracing::warn!(profile = %name, host = %authority, kind = "unknown_profile", "unknown fingerprint");
+                return Ok(bad_gateway("roxy: unknown fingerprint"));
+            }
             Err(e) => {
-                tracing::warn!(error = %e, "upstream send failed");
-                return Ok(bad_gateway("upstream error"));
+                let kind = upstream_kind(&e);
+                tracing::warn!(error = %e, profile = %label, host = %authority, kind = %kind, "upstream send failed");
+                return Ok(bad_gateway("roxy: upstream error"));
             }
         };
 
@@ -204,4 +238,117 @@ fn reply_from_cache(hit: roxy_cache::CachedResponse) -> Response<BoxBody> {
         }
     }
     resp
+}
+
+#[derive(Debug, PartialEq)]
+enum LabelError {
+    MultipleHeaders,
+    BadValue(String),
+}
+
+fn resolve_label(
+    headers: &http::HeaderMap,
+    default_profile: Option<&str>,
+) -> Result<String, LabelError> {
+    let mut iter = headers.get_all(FINGERPRINT_HEADER).iter();
+    let first = iter.next();
+    if iter.next().is_some() {
+        return Err(LabelError::MultipleHeaders);
+    }
+    let raw = match first {
+        Some(v) => v.to_str().unwrap_or("").trim(),
+        None => "",
+    };
+    if raw.is_empty() {
+        return Ok(default_profile.unwrap_or(DEFAULT_LABEL).to_string());
+    }
+    if raw == NONE_LABEL {
+        return Ok(DEFAULT_LABEL.to_string());
+    }
+    if roxy_impersonate::ProfileName::parse(raw).is_err() {
+        return Err(LabelError::BadValue(raw.to_string()));
+    }
+    Ok(raw.to_string())
+}
+
+fn upstream_kind(e: &UpstreamError) -> &'static str {
+    match e {
+        UpstreamError::UnknownFingerprint(_) => "unknown_profile",
+        UpstreamError::Impersonate(roxy_impersonate::ImpersonateError::Wreq(_)) => "impersonate",
+        UpstreamError::Impersonate(_) => "impersonate_other",
+        UpstreamError::Client(_) => "rustls_client",
+        UpstreamError::Uri(_) => "uri",
+    }
+}
+
+fn simple(status: StatusCode, msg: &'static str) -> Response<BoxBody> {
+    let body = Full::new(Bytes::from_static(msg.as_bytes()))
+        .map_err(|never| match never {})
+        .boxed_unsync();
+    let mut resp = http::Response::new(body);
+    *resp.status_mut() = status;
+    resp
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+    use http::HeaderMap;
+
+    fn hdr(values: &[&str]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for v in values {
+            h.append(FINGERPRINT_HEADER, http::HeaderValue::from_str(v).unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn absent_header_uses_default_or_default_label() {
+        let h = HeaderMap::new();
+        assert_eq!(resolve_label(&h, None).unwrap(), DEFAULT_LABEL);
+        assert_eq!(resolve_label(&h, Some("chrome-137")).unwrap(), "chrome-137");
+    }
+
+    #[test]
+    fn empty_value_treated_as_absent() {
+        let h = hdr(&[""]);
+        assert_eq!(resolve_label(&h, Some("chrome-137")).unwrap(), "chrome-137");
+    }
+
+    #[test]
+    fn none_forces_default_label() {
+        let h = hdr(&["none"]);
+        assert_eq!(
+            resolve_label(&h, Some("chrome-137")).unwrap(),
+            DEFAULT_LABEL
+        );
+    }
+
+    #[test]
+    fn explicit_known_name_used() {
+        let h = hdr(&["firefox-139"]);
+        assert_eq!(
+            resolve_label(&h, Some("chrome-137")).unwrap(),
+            "firefox-139"
+        );
+    }
+
+    #[test]
+    fn multiple_headers_error() {
+        let h = hdr(&["chrome-137", "firefox-139"]);
+        assert_eq!(
+            resolve_label(&h, None).unwrap_err(),
+            LabelError::MultipleHeaders
+        );
+    }
+
+    #[test]
+    fn malformed_value_error() {
+        let h = hdr(&["Chrome_137"]);
+        match resolve_label(&h, None).unwrap_err() {
+            LabelError::BadValue(v) => assert_eq!(v, "Chrome_137"),
+            other => panic!("got {other:?}"),
+        }
+    }
 }

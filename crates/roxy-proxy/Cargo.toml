@@ -21,6 +21,7 @@ roxy-cache = { workspace = true }
 roxy-cache-fs = { workspace = true }
 roxy-config = { workspace = true }
 roxy-http = { workspace = true }
+roxy-impersonate = { workspace = true }
 roxy-mitm = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

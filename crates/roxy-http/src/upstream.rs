@@ -76,6 +76,12 @@ pub enum UpstreamError {
 
     #[error("invalid uri: {0}")]
     Uri(String),
+
+    #[error("unknown fingerprint: {0}")]
+    UnknownFingerprint(String),
+
+    #[error("impersonate: {0}")]
+    Impersonate(#[from] roxy_impersonate::ImpersonateError),
 }
 
 #[derive(Clone)]

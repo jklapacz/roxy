@@ -33,12 +33,23 @@ pub async fn run(config_path: Option<&Path>) -> anyhow::Result<()> {
     let resolver = Arc::new(SniResolver::new(signer, SNI_CACHE_CAPACITY));
     let terminator = Terminator::new(resolver);
 
-    let upstream = roxy_http::UpstreamClient::new().context("upstream client")?;
+    let rustls = roxy_http::UpstreamClient::new().context("upstream client")?;
+
+    // Task 7 will plumb [impersonate] config; for now we always provide an
+    // ImpersonateClient with no custom profiles. Per-request X-Roxy-Fingerprint
+    // for builtin profiles works immediately. default_profile = None means
+    // requests without the header go through the rustls path.
+    let impersonate = Some(roxy_impersonate::ImpersonateClient::new());
+
+    let router = Arc::new(roxy_http::UpstreamRouter::new(rustls, impersonate));
+
     let handler = ProxyConnHandler {
         inner: Arc::new(Handler {
             cache: cache.clone(),
             default_ttl: Duration::from_secs(cfg.cache.default_ttl_seconds),
-            upstream,
+            router,
+            default_profile: None,
+            strip_fingerprint_header: true,
             disconnect_cap: 50 * 1024 * 1024,
         }),
     };

@@ -1967,6 +1967,7 @@ dependencies = [
  "roxy-cache-fs",
  "roxy-config",
  "roxy-http",
+ "roxy-impersonate",
  "roxy-mitm",
  "rustls",
  "rustls-pki-types",
