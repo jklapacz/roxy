@@ -1,6 +1,5 @@
 mod ca_cmd;
 mod cli;
-#[allow(dead_code)]
 mod handler;
 mod serve;
 
