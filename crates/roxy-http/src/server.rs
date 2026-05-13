@@ -6,7 +6,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use tokio_rustls::server::TlsStream;
 
-pub type BoxBody = http_body_util::combinators::BoxBody<bytes::Bytes, std::io::Error>;
+pub type BoxBody = http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, std::io::Error>;
 
 pub async fn serve_tls<F, Fut>(tls: TlsStream<tokio::net::TcpStream>, handler: F)
 where

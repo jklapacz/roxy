@@ -1,11 +1,17 @@
 use http::{Request, Response};
-use http_body_util::Empty;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Empty};
 use hyper::body::Incoming;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use std::time::Duration;
 use thiserror::Error;
+
+/// Body type accepted by [`UpstreamClient::send`]. Generic over a boxed
+/// `http_body::Body` so callers can forward arbitrary request bodies (e.g.
+/// streamed POSTs) through the upstream pool.
+pub type ClientBody = BoxBody<bytes::Bytes, std::io::Error>;
 
 #[derive(Debug, Error)]
 pub enum UpstreamError {
@@ -18,7 +24,7 @@ pub enum UpstreamError {
 
 #[derive(Clone)]
 pub struct UpstreamClient {
-    inner: Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<bytes::Bytes>>,
+    inner: Client<hyper_rustls::HttpsConnector<HttpConnector>, ClientBody>,
 }
 
 impl UpstreamClient {
@@ -42,14 +48,27 @@ impl UpstreamClient {
         let inner = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(300))
             .pool_max_idle_per_host(32)
-            .build(https);
+            .build::<_, ClientBody>(https);
         Ok(Self { inner })
     }
 
+    /// Send a request with a streaming [`ClientBody`].
+    pub async fn send(
+        &self,
+        req: Request<ClientBody>,
+    ) -> Result<Response<Incoming>, UpstreamError> {
+        Ok(self.inner.request(req).await?)
+    }
+
+    /// Send a request with an empty body. Internally converts to a [`ClientBody`]
+    /// so it shares the same connection pool as [`Self::send`].
     pub async fn send_empty(
         &self,
         req: Request<Empty<bytes::Bytes>>,
     ) -> Result<Response<Incoming>, UpstreamError> {
+        let (parts, body) = req.into_parts();
+        let body: ClientBody = body.map_err(|never| match never {}).boxed();
+        let req = Request::from_parts(parts, body);
         Ok(self.inner.request(req).await?)
     }
 }
