@@ -22,6 +22,7 @@ test-utils = ["roxy-impersonate/test-utils"]
 [dependencies]
 roxy-cache = { workspace = true }
 roxy-cache-fs = { workspace = true }
+roxy-capture = { workspace = true }
 roxy-config = { workspace = true }
 roxy-http = { workspace = true }
 roxy-impersonate = { workspace = true }

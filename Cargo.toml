@@ -8,6 +8,7 @@ members = [
     "crates/roxy-cache-fs",
     "crates/roxy-config",
     "crates/roxy-impersonate",
+    "crates/roxy-capture",
 ]
 
 [workspace.package]
@@ -62,9 +63,14 @@ dirs = "5"
 wreq = { version = "6.0.0-rc.28", features = ["stream"] }
 wreq-util = "3.0.0-rc.10"
 
+# tls fingerprint capture
+tls-parser = "0.12"
+httlib-hpack = "0.1"
+
 # internal
 roxy-cache = { path = "crates/roxy-cache" }
 roxy-cache-fs = { path = "crates/roxy-cache-fs" }
+roxy-capture = { path = "crates/roxy-capture" }
 roxy-config = { path = "crates/roxy-config" }
 roxy-http = { path = "crates/roxy-http" }
 roxy-impersonate = { path = "crates/roxy-impersonate" }

@@ -67,7 +67,30 @@ settings_order = ["HEADER_TABLE_SIZE", "ENABLE_PUSH", "INITIAL_WINDOW_SIZE", "MA
 header_order = [":method", ":authority", ":scheme", ":path", "user-agent", "accept"]
 ```
 
-The full design + capture workflow is in `docs/superpowers/specs/2026-05-13-tls-fingerprint-emulation-design.md`.
+The full design is in `docs/superpowers/specs/2026-05-13-tls-fingerprint-emulation-design.md`.
+
+## Capturing fingerprints
+
+Rather than hand-writing a custom profile, you can have roxy capture a real
+client's fingerprint. Enable the opt-in capture server:
+
+```toml
+[capture]
+enabled = true
+# Address the capture server listens on, separate from the proxy port.
+listen = "127.0.0.1:8091"
+```
+
+Install roxy's CA (`roxy ca install`), then point a browser (or any TLS client)
+at `https://localhost:8091/?name=<profile-name>`. roxy parses that client's raw
+TLS ClientHello and HTTP/2 settings, writes a ready-to-use profile TOML to
+`impersonate.profiles_dir`, and echoes the same TOML back in the response for
+review. Restart roxy and the captured profile is available like any other
+custom profile (including via `X-Roxy-Fingerprint`).
+
+If the client negotiates HTTP/1.1 the `[http2]` block can't be captured and is
+emitted as a clearly-marked template. Cipher suites and extensions with no roxy
+identifier are omitted and noted in a comment at the top of the file.
 
 ## Build prerequisites
 

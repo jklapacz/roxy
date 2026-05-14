@@ -44,6 +44,23 @@ pub async fn run(
     let resolver = Arc::new(SniResolver::new(signer, SNI_CACHE_CAPACITY));
     let terminator = Terminator::new(resolver);
 
+    // Opt-in TLS-fingerprint capture server on its own port. It reuses the
+    // MITM terminator (CA-backed cert resolver) and writes captured profiles
+    // into the same directory the impersonate path loads them from.
+    if cfg.capture.enabled {
+        let capture_listen = cfg.capture.listen;
+        let capture_terminator = terminator.clone();
+        let capture_profiles_dir = cfg.impersonate.profiles_dir.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                roxy_capture::run(capture_listen, capture_terminator, capture_profiles_dir).await
+            {
+                tracing::error!(error = %e, "capture server exited");
+            }
+        });
+        tracing::info!(addr = %cfg.capture.listen, "capture server enabled");
+    }
+
     let rustls = roxy_http::UpstreamClient::new().context("upstream client")?;
     let impersonate = build_impersonate(&cfg)?;
     let router = Arc::new(roxy_http::UpstreamRouter::new(rustls, impersonate));

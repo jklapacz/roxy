@@ -15,6 +15,7 @@ pub struct Config {
     pub ca: CaConfig,
     pub log: LogConfig,
     pub impersonate: ImpersonateConfig,
+    pub capture: CaptureConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -64,6 +65,27 @@ impl Default for ImpersonateConfig {
     }
 }
 
+/// TLS-fingerprint capture server. Opt-in; runs on its own port. A browser
+/// configured to trust roxy's CA can visit it to have its fingerprint captured
+/// into a custom profile written under `impersonate.profiles_dir`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct CaptureConfig {
+    /// When false, the capture server is not started.
+    pub enabled: bool,
+    /// Address the capture server listens on (separate from the proxy port).
+    pub listen: SocketAddr,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8091),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -72,6 +94,7 @@ impl Default for Config {
             ca: CaConfig::default(),
             log: LogConfig::default(),
             impersonate: ImpersonateConfig::default(),
+            capture: CaptureConfig::default(),
         }
     }
 }
@@ -181,6 +204,24 @@ mod tests {
         assert_eq!(c.impersonate.default_profile, None);
         assert_eq!(c.impersonate.profiles_dir, PathBuf::from("./profiles"));
         assert!(c.impersonate.strip_header);
+    }
+
+    #[test]
+    fn capture_section_defaults() {
+        let c = Config::default();
+        assert!(!c.capture.enabled);
+        assert_eq!(c.capture.listen.to_string(), "127.0.0.1:8091");
+    }
+
+    #[test]
+    fn capture_section_parses_from_toml() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"[capture]"#).unwrap();
+        writeln!(f, r#"enabled = true"#).unwrap();
+        writeln!(f, r#"listen = "127.0.0.1:9191""#).unwrap();
+        let c = load_from_path(f.path()).unwrap();
+        assert!(c.capture.enabled);
+        assert_eq!(c.capture.listen.to_string(), "127.0.0.1:9191");
     }
 
     #[test]
