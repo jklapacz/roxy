@@ -111,6 +111,9 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
         }
 
         cursor = &cursor[body_end..];
+        // WINDOW_UPDATE arrives before HEADERS in the client preface (RFC 9113
+        // mandates SETTINGS first; Chrome sends SETTINGS, WINDOW_UPDATE, HEADERS),
+        // so it is always captured before this break fires.
         if got_settings && header_order.is_some() {
             break;
         }
@@ -287,6 +290,28 @@ mod tests {
         let mut wu = vec![0, 0, 4, 0x8, 0, 0, 0, 0, 0];
         wu.extend_from_slice(&15663105u32.to_be_bytes());
         buf.extend_from_slice(&wu);
+        buf.extend_from_slice(&frame(
+            FRAME_HEADERS,
+            0x4,
+            &hpack_block(&[(":method", "GET")]),
+        ));
+        let h2 = parse_http2(&buf).expect("should parse");
+        assert_eq!(h2.initial_connection_window_size, Some(15663105));
+    }
+
+    #[test]
+    fn stream_level_window_update_is_ignored() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(PREFACE);
+        buf.extend_from_slice(&frame(FRAME_SETTINGS, 0, &settings_body(&[(0x2, 0)])));
+        // Stream-level WINDOW_UPDATE (stream id 1) — must NOT be captured.
+        let mut stream_wu = vec![0, 0, 4, 0x8, 0, 0, 0, 0, 1];
+        stream_wu.extend_from_slice(&999u32.to_be_bytes());
+        buf.extend_from_slice(&stream_wu);
+        // Connection-level WINDOW_UPDATE (stream id 0) — this is the one to capture.
+        let mut conn_wu = vec![0, 0, 4, 0x8, 0, 0, 0, 0, 0];
+        conn_wu.extend_from_slice(&15663105u32.to_be_bytes());
+        buf.extend_from_slice(&conn_wu);
         buf.extend_from_slice(&frame(
             FRAME_HEADERS,
             0x4,
