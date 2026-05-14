@@ -227,6 +227,14 @@ mod tests {
     }
 
     #[test]
+    fn grease_false_omits_grease_field() {
+        let name = ProfileName::parse("captured-no-grease").unwrap();
+        let tls = sample_tls(); // grease: false
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        assert!(!toml.contains("grease ="), "toml:\n{toml}");
+    }
+
+    #[test]
     fn write_profile_creates_dir_and_file() {
         let name = ProfileName::parse("written-profile").unwrap();
         let toml = render(&name, &sample_tls(), Some(&sample_http2()), None);
