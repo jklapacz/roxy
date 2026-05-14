@@ -58,6 +58,33 @@ impl<C: Cache + 'static> Handler<C> {
         self.handle_inner(label, authority, "https", req).await
     }
 
+    pub async fn handle_plain(
+        &self,
+        mut req: http::Request<hyper::body::Incoming>,
+    ) -> Result<http::Response<BoxBody>, std::convert::Infallible> {
+        // 1. Extract the absolute-form target (authority + scheme).
+        let (authority, scheme) = match extract_plain_target(req.uri()) {
+            Ok(t) => t,
+            Err(_) => {
+                return Ok(simple(
+                    http::StatusCode::BAD_REQUEST,
+                    "roxy: HTTP request missing absolute-form URI",
+                ));
+            }
+        };
+
+        // 2. Plain HTTP strict-ignores X-Roxy-Fingerprint. Strip it
+        //    unconditionally; never honor it. See spec, "Non-goals".
+        req.headers_mut().remove(FINGERPRINT_HEADER);
+
+        // 3. Force routing through the rustls (_default) path. Fingerprint
+        //    has no meaningful effect over plain HTTP and is documented
+        //    as such.
+        let label = DEFAULT_LABEL.to_string();
+
+        self.handle_inner(label, authority, &scheme, req).await
+    }
+
     async fn handle_inner(
         &self,
         label: String,
@@ -71,7 +98,7 @@ impl<C: Cache + 'static> Handler<C> {
             return Ok(reply_from_cache(hit));
         }
 
-        // 4. Rebuild upstream URI (authority is from CONNECT, path comes from inner request).
+        // 4. Rebuild upstream URI (authority is supplied by the caller, path comes from the request).
         let path_and_query = req
             .uri()
             .path_and_query()
@@ -297,6 +324,21 @@ fn authority_matches(connect: &str, client: &str) -> bool {
             .unwrap_or(lower)
     }
     normalize(connect) == normalize(client)
+}
+
+/// Extract the target from an absolute-form request URI.
+///
+/// Returns `Ok((authority, scheme))` — authority first, scheme second.
+/// Returns `Err` with a static message when the URI has no authority
+/// (e.g. a path-only request-target, which is invalid for a forward proxy).
+fn extract_plain_target(uri: &http::Uri) -> Result<(String, String), &'static str> {
+    let authority = uri
+        .authority()
+        .ok_or("missing absolute-form authority")?
+        .as_str()
+        .to_string();
+    let scheme = uri.scheme_str().unwrap_or("http").to_string();
+    Ok((authority, scheme))
 }
 
 fn build_cache_key_and_warn<B>(
@@ -537,5 +579,27 @@ mod key_tests {
             http_key, https_key,
             "scheme must participate in the cache key"
         );
+    }
+
+    #[test]
+    fn extract_plain_target_absolute_form_http() {
+        let uri: http::Uri = "http://example.com/path".parse().unwrap();
+        let (authority, scheme) = extract_plain_target(&uri).unwrap();
+        assert_eq!(authority, "example.com");
+        assert_eq!(scheme, "http");
+    }
+
+    #[test]
+    fn extract_plain_target_preserves_port() {
+        let uri: http::Uri = "http://example.com:8080/path".parse().unwrap();
+        let (authority, _) = extract_plain_target(&uri).unwrap();
+        assert_eq!(authority, "example.com:8080");
+    }
+
+    #[test]
+    fn extract_plain_target_path_only_errors() {
+        let uri: http::Uri = "/path".parse().unwrap();
+        let err = extract_plain_target(&uri).unwrap_err();
+        assert!(err.contains("authority"), "got: {err}");
     }
 }
