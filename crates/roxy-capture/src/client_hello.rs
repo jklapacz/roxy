@@ -36,6 +36,13 @@ pub struct CapturedTls {
     pub skipped_ciphers: Vec<u16>,
     /// Whether any GREASE value was observed in the ClientHello.
     pub grease: bool,
+    pub enable_ocsp_stapling: bool,
+    pub enable_signed_cert_timestamps: bool,
+    pub enable_ech_grease: bool,
+    pub session_ticket: bool,
+    pub renegotiation: bool,
+    pub record_size_limit: Option<u16>,
+    pub pre_shared_key_seen: bool,
 }
 
 /// Parse the first TLS record in `record` as a ClientHello.
@@ -73,6 +80,13 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
     let mut alpn = Vec::new();
     let mut supported_groups = Vec::new();
     let mut skipped_curves = Vec::new();
+    let mut enable_ocsp_stapling = false;
+    let mut enable_signed_cert_timestamps = false;
+    let mut enable_ech_grease = false;
+    let mut session_ticket = false;
+    let mut renegotiation = false;
+    let mut record_size_limit: Option<u16> = None;
+    let mut pre_shared_key_seen = false;
 
     if let Some(ext_bytes) = ch.ext {
         let (_, exts) = parse_tls_client_hello_extensions(ext_bytes)
@@ -84,6 +98,9 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
                 continue;
             }
             let ty: u16 = TlsExtensionType::from(ext).0;
+            if ty == 65037 {
+                enable_ech_grease = true;
+            }
             match extension_name(ty) {
                 Some(name) => extensions.push(name.to_string()),
                 None => skipped_extensions.push(ty),
@@ -130,6 +147,12 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
                         }
                     }
                 }
+                TlsExtension::StatusRequest(_) => enable_ocsp_stapling = true,
+                TlsExtension::SignedCertificateTimestamp(_) => enable_signed_cert_timestamps = true,
+                TlsExtension::SessionTicket(_) => session_ticket = true,
+                TlsExtension::RenegotiationInfo(_) => renegotiation = true,
+                TlsExtension::PreSharedKey(_) => pre_shared_key_seen = true,
+                TlsExtension::RecordSizeLimit(v) => record_size_limit = Some(*v),
                 _ => {}
             }
         }
@@ -146,6 +169,13 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
         skipped_extensions,
         skipped_ciphers,
         grease,
+        enable_ocsp_stapling,
+        enable_signed_cert_timestamps,
+        enable_ech_grease,
+        session_ticket,
+        renegotiation,
+        record_size_limit,
+        pre_shared_key_seen,
     })
 }
 

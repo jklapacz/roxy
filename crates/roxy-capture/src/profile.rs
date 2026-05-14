@@ -79,6 +79,24 @@ pub fn render(
     if tls.grease {
         out.push_str("grease = true\n");
     }
+    if tls.enable_ocsp_stapling {
+        out.push_str("enable_ocsp_stapling = true\n");
+    }
+    if tls.enable_signed_cert_timestamps {
+        out.push_str("enable_signed_cert_timestamps = true\n");
+    }
+    if tls.enable_ech_grease {
+        out.push_str("enable_ech_grease = true\n");
+    }
+    if tls.session_ticket {
+        out.push_str("session_ticket = true\n");
+    }
+    if tls.renegotiation {
+        out.push_str("renegotiation = true\n");
+    }
+    if let Some(limit) = tls.record_size_limit {
+        out.push_str(&format!("record_size_limit = {limit}\n"));
+    }
     out.push('\n');
 
     out.push_str("[http2]\n");
@@ -168,6 +186,13 @@ mod tests {
             skipped_extensions: vec![],
             skipped_ciphers: vec![],
             grease: false,
+            enable_ocsp_stapling: false,
+            enable_signed_cert_timestamps: false,
+            enable_ech_grease: false,
+            session_ticket: false,
+            renegotiation: false,
+            record_size_limit: None,
+            pre_shared_key_seen: false,
         }
     }
 
@@ -232,6 +257,29 @@ mod tests {
         let tls = sample_tls(); // grease: false
         let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
         assert!(!toml.contains("grease ="), "toml:\n{toml}");
+    }
+
+    #[test]
+    fn feature_toggles_emit_when_set() {
+        let name = ProfileName::parse("captured-toggles").unwrap();
+        let mut tls = sample_tls();
+        tls.enable_ocsp_stapling = true;
+        tls.enable_signed_cert_timestamps = true;
+        tls.enable_ech_grease = true;
+        tls.session_ticket = true;
+        tls.renegotiation = true;
+        tls.record_size_limit = Some(16385);
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        for needle in [
+            "enable_ocsp_stapling = true",
+            "enable_signed_cert_timestamps = true",
+            "enable_ech_grease = true",
+            "session_ticket = true",
+            "renegotiation = true",
+            "record_size_limit = 16385",
+        ] {
+            assert!(toml.contains(needle), "missing {needle} in:\n{toml}");
+        }
     }
 
     #[test]
