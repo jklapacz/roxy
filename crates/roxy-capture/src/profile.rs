@@ -76,6 +76,9 @@ pub fn render(
         "supported_groups = {}\n",
         string_array(&tls.supported_groups)
     ));
+    if tls.grease {
+        out.push_str("grease = true\n");
+    }
     out.push('\n');
 
     out.push_str("[http2]\n");
@@ -164,6 +167,7 @@ mod tests {
             skipped_curves: vec![],
             skipped_extensions: vec![],
             skipped_ciphers: vec![],
+            grease: false,
         }
     }
 
@@ -211,6 +215,15 @@ mod tests {
         std::fs::write(&path, &toml).unwrap();
         roxy_impersonate::CustomProfile::load(&path)
             .expect("HTTP/1.1-fallback TOML must still load");
+    }
+
+    #[test]
+    fn grease_true_emits_grease_field() {
+        let name = ProfileName::parse("captured-grease").unwrap();
+        let mut tls = sample_tls();
+        tls.grease = true;
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        assert!(toml.contains("grease = true"), "toml:\n{toml}");
     }
 
     #[test]

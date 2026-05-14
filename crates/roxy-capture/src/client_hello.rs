@@ -34,6 +34,8 @@ pub struct CapturedTls {
     pub skipped_extensions: Vec<u16>,
     /// Cipher suite ids seen on the wire that `tls-parser` could not name.
     pub skipped_ciphers: Vec<u16>,
+    /// Whether any GREASE value was observed in the ClientHello.
+    pub grease: bool,
 }
 
 /// Parse the first TLS record in `record` as a ClientHello.
@@ -49,11 +51,13 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
         })
         .context("first TLS record is not a ClientHello")?;
 
+    let mut grease = false;
     let mut cipher_suites = Vec::new();
     let mut skipped_ciphers = Vec::new();
     for c in &ch.ciphers {
         let id = c.0;
         if is_grease(id) {
+            grease = true;
             continue;
         }
         match TlsCipherSuite::from_id(id) {
@@ -76,6 +80,7 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
         for ext in &exts {
             // GREASE extension: a random placeholder type, never replayed.
             if matches!(ext, TlsExtension::Grease(..)) {
+                grease = true;
                 continue;
             }
             let ty: u16 = TlsExtensionType::from(ext).0;
@@ -87,6 +92,7 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
                 TlsExtension::SupportedVersions(versions) => {
                     for v in versions {
                         if is_grease(v.0) {
+                            grease = true;
                             continue;
                         }
                         if let Some(name) = tls_version_name(v.0) {
@@ -97,6 +103,7 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
                 TlsExtension::SignatureAlgorithms(algs) => {
                     for a in algs {
                         if is_grease(*a) {
+                            grease = true;
                             continue;
                         }
                         if let Some(name) = sigalg_name(*a) {
@@ -114,6 +121,7 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
                 TlsExtension::EllipticCurves(groups) => {
                     for g in groups {
                         if is_grease(g.0) {
+                            grease = true;
                             continue;
                         }
                         match curve_name(g.0) {
@@ -137,6 +145,7 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
         skipped_curves,
         skipped_extensions,
         skipped_ciphers,
+        grease,
     })
 }
 
