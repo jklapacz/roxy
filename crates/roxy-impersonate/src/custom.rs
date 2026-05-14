@@ -660,7 +660,10 @@ header_order = [":method", ":authority", ":scheme", ":path"]
         match CustomProfile::load(&path) {
             Err(ImpersonateError::CustomLoad { source, .. }) => {
                 let msg = format!("{source}");
-                assert!(msg.contains("parse"), "got: {msg}");
+                assert!(
+                    msg.contains("extensions"),
+                    "expected 'extensions' in error, got: {msg}"
+                );
             }
             other => panic!("expected CustomLoad parse error, got {other:?}"),
         }
@@ -683,5 +686,14 @@ header_order = [":method", ":authority", ":scheme", ":path"]
         let profiles = CustomProfile::load_dir(dir.path()).unwrap();
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].spec.name, "chrome-148");
+    }
+
+    #[test]
+    fn version_bounds_resolves_min_and_max() {
+        assert_eq!(version_bounds(&[]), (None, None));
+        assert_eq!(
+            version_bounds(&[TlsVersion::TLS_1_3, TlsVersion::TLS_1_2]),
+            (Some(TlsVersion::TLS_1_2), Some(TlsVersion::TLS_1_3))
+        );
     }
 }

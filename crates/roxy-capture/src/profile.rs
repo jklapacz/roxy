@@ -48,7 +48,11 @@ pub fn render(
         out.push_str(&format!(
             "# NOTE: {} named group(s) were unrecognized and omitted: {}\n",
             tls.skipped_curves.len(),
-            join_nums(&tls.skipped_curves),
+            tls.skipped_curves
+                .iter()
+                .map(|n| format!("0x{n:04x}"))
+                .collect::<Vec<_>>()
+                .join(", "),
         ));
     }
     out.push('\n');
