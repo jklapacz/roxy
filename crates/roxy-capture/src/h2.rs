@@ -16,6 +16,14 @@
 
 use httlib_hpack::Decoder;
 
+/// Stream dependency extracted from a HEADERS frame PRIORITY prefix.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedStreamDependency {
+    pub stream_id: u32,
+    pub weight: u8,
+    pub exclusive: bool,
+}
+
 /// The subset of an HTTP/2 connection that maps onto `roxy-impersonate`'s
 /// `Http2Spec`.
 #[derive(Debug, Clone, PartialEq)]
@@ -31,6 +39,7 @@ pub struct CapturedHttp2 {
     pub no_rfc7540_priorities: Option<bool>,
     pub settings_order: Vec<String>,
     pub header_order: Vec<String>,
+    pub headers_stream_dependency: Option<CapturedStreamDependency>,
 }
 
 const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -62,6 +71,7 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
     let mut settings_order: Vec<String> = Vec::new();
     let mut got_settings = false;
     let mut header_order: Option<Vec<String>> = None;
+    let mut headers_stream_dependency: Option<CapturedStreamDependency> = None;
 
     while cursor.len() >= FRAME_HEADER_LEN {
         let len = u32::from_be_bytes([0, cursor[0], cursor[1], cursor[2]]) as usize;
@@ -96,7 +106,9 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
                 got_settings = true;
             }
             FRAME_HEADERS if header_order.is_none() => {
-                header_order = Some(decode_pseudo_order(body, flags));
+                let (order, dep) = decode_pseudo_order(body, flags);
+                header_order = Some(order);
+                headers_stream_dependency = dep;
             }
             FRAME_WINDOW_UPDATE if initial_connection_window_size.is_none() => {
                 let stream_id =
@@ -132,31 +144,40 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
         no_rfc7540_priorities,
         settings_order,
         header_order,
+        headers_stream_dependency,
     })
 }
 
 /// HPACK-decode a HEADERS frame body and return the pseudo-header (`:`-prefixed)
-/// names in the order they appear. Padding/priority prefixes are stripped
-/// first. A truncated or continued block still yields whatever decoded before
-/// the cut — pseudo-headers come first, so they survive.
-fn decode_pseudo_order(body: &[u8], flags: u8) -> Vec<String> {
+/// names in the order they appear, plus the optional PRIORITY stream dependency.
+/// Padding/priority prefixes are stripped first. A truncated or continued block
+/// still yields whatever decoded before the cut — pseudo-headers come first, so
+/// they survive.
+fn decode_pseudo_order(body: &[u8], flags: u8) -> (Vec<String>, Option<CapturedStreamDependency>) {
     let mut block = body;
     let mut pad_len = 0usize;
     if flags & FLAG_PADDED != 0 {
         let Some((first, rest)) = block.split_first() else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         pad_len = *first as usize;
         block = rest;
     }
+    let mut stream_dependency = None;
     if flags & FLAG_PRIORITY != 0 {
         if block.len() < 5 {
-            return Vec::new();
+            return (Vec::new(), None);
         }
-        block = &block[5..]; // 4-byte stream dependency + 1-byte weight
+        let raw = u32::from_be_bytes([block[0], block[1], block[2], block[3]]);
+        stream_dependency = Some(CapturedStreamDependency {
+            stream_id: raw & 0x7fff_ffff,
+            weight: block[4],
+            exclusive: raw & 0x8000_0000 != 0,
+        });
+        block = &block[5..];
     }
     if pad_len > block.len() {
-        return Vec::new();
+        return (Vec::new(), stream_dependency);
     }
     block = &block[..block.len() - pad_len];
 
@@ -167,13 +188,14 @@ fn decode_pseudo_order(body: &[u8], flags: u8) -> Vec<String> {
     // Pseudo-headers lead the block, so they survive a CONTINUATION cut.
     let _ = decoder.decode(&mut input, &mut decoded);
 
-    decoded
+    let order = decoded
         .iter()
         .filter_map(|(name, _, _)| {
             let name = std::str::from_utf8(name).ok()?;
             name.starts_with(':').then(|| name.to_string())
         })
-        .collect()
+        .collect();
+    (order, stream_dependency)
 }
 
 /// SETTINGS identifier → `custom.rs`'s `setting_from_str` identifier.
@@ -330,7 +352,27 @@ mod tests {
         body.extend_from_slice(&block);
         body.extend_from_slice(&[0, 0, 0]); // padding
 
-        let order = decode_pseudo_order(&body, FLAG_PADDED | FLAG_PRIORITY);
+        let (order, _) = decode_pseudo_order(&body, FLAG_PADDED | FLAG_PRIORITY);
         assert_eq!(order, vec![":method", ":path"]);
+    }
+
+    #[test]
+    fn captures_headers_stream_dependency() {
+        let block = hpack_block(&[(":method", "GET")]);
+        let mut body = Vec::new();
+        // PRIORITY prefix: 4-byte (exclusive bit + dependency), 1-byte weight.
+        body.extend_from_slice(&[0x80, 0, 0, 0, 219]); // exclusive=1, dep=0, weight=219
+        body.extend_from_slice(&block);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(PREFACE);
+        buf.extend_from_slice(&frame(FRAME_SETTINGS, 0, &settings_body(&[(0x2, 0)])));
+        buf.extend_from_slice(&frame(FRAME_HEADERS, 0x4 | 0x20, &body)); // END_HEADERS | PRIORITY
+        let h2 = parse_http2(&buf).expect("should parse");
+        let dep = h2
+            .headers_stream_dependency
+            .expect("priority should be captured");
+        assert_eq!(dep.stream_id, 0);
+        assert_eq!(dep.weight, 219);
+        assert!(dep.exclusive);
     }
 }

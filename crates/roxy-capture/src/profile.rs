@@ -176,6 +176,12 @@ pub fn render(
                 "header_order = {}\n",
                 string_array(&h.header_order)
             ));
+            if let Some(dep) = &h.headers_stream_dependency {
+                out.push_str("\n[http2.headers_stream_dependency]\n");
+                out.push_str(&format!("stream_id = {}\n", dep.stream_id));
+                out.push_str(&format!("weight = {}\n", dep.weight));
+                out.push_str(&format!("exclusive = {}\n", dep.exclusive));
+            }
         }
         None => {
             out.push_str(
@@ -267,6 +273,7 @@ mod tests {
             no_rfc7540_priorities: None,
             settings_order: vec!["HEADER_TABLE_SIZE".into(), "ENABLE_PUSH".into()],
             header_order: vec![":method".into(), ":authority".into()],
+            headers_stream_dependency: None,
         }
     }
 
