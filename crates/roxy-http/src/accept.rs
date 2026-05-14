@@ -9,11 +9,12 @@ pub type Handler = Arc<dyn ConnHandler + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait ConnHandler: Send + Sync {
-    async fn handle(
+    async fn handle_tunneled(
         &self,
         authority: String,
         tls_stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     );
+    async fn handle_plain(&self, stream: tokio::net::TcpStream);
 }
 
 pub async fn run(
@@ -56,7 +57,7 @@ pub async fn run(
                     return;
                 }
             };
-            handler.handle(host, tls).await;
+            handler.handle_tunneled(host, tls).await;
         });
     }
 }

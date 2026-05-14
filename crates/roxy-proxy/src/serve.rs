@@ -146,7 +146,7 @@ struct ProxyConnHandler<C: Cache + 'static> {
 
 #[async_trait::async_trait]
 impl<C: Cache + 'static> ConnHandler for ProxyConnHandler<C> {
-    async fn handle(
+    async fn handle_tunneled(
         &self,
         authority: String,
         tls: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
@@ -157,6 +157,15 @@ impl<C: Cache + 'static> ConnHandler for ProxyConnHandler<C> {
             let inner = inner.clone();
             let authority = authority_clone.clone();
             async move { inner.handle_tunneled(authority, req).await }
+        })
+        .await;
+    }
+
+    async fn handle_plain(&self, stream: tokio::net::TcpStream) {
+        let inner = self.inner.clone();
+        roxy_http::serve_http_plain(stream, move |req| {
+            let inner = inner.clone();
+            async move { inner.handle_plain(req).await }
         })
         .await;
     }

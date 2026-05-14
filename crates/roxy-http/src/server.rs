@@ -22,3 +22,18 @@ where
         .serve_connection(io, svc)
         .await;
 }
+
+pub async fn serve_http_plain<F, Fut>(stream: tokio::net::TcpStream, handler: F)
+where
+    F: Fn(Request<Incoming>) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<Response<BoxBody>, Infallible>> + Send + 'static,
+{
+    let io = TokioIo::new(stream);
+    let svc = hyper::service::service_fn(move |req| {
+        let handler = handler.clone();
+        async move { handler(req).await }
+    });
+    let _ = auto::Builder::new(TokioExecutor::new())
+        .serve_connection(io, svc)
+        .await;
+}
