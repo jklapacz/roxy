@@ -101,7 +101,12 @@ async fn captured_chrome_148_matches_real_ja4r_and_peetprint() {
 
     // JA4_r = <ja4_a>_<ciphers>_<extensions>_<sigalgs>. Compare the cipher and
     // sigalg sections verbatim; compare the extension section after removing
-    // 0xca34 (51764) from the real value — wreq cannot emit it (hard limit).
+    // two extensions roxy cannot reproduce on a cold connection:
+    //   - 0xca34 (51764): no wreq knob exists for it.
+    //   - 0x0029 (41, pre_shared_key): only appears on TLS 1.3 session
+    //     resumption; a cold request has no cached ticket to offer, so neither
+    //     roxy nor real Chrome would send it on a first visit. The reference
+    //     was captured warm. (See design doc, decision 3.)
     let real: Vec<&str> = REAL_CHROME_148_JA4R.split('_').collect();
     let got: Vec<&str> = got_ja4r.split('_').collect();
     assert_eq!(got.len(), 4, "unexpected JA4_r shape: {got_ja4r}");
@@ -109,16 +114,20 @@ async fn captured_chrome_148_matches_real_ja4r_and_peetprint() {
     assert_eq!(got[3], real[3], "JA4_r sigalg section mismatch");
     assert_eq!(
         got[2],
-        real[2].replace("ca34,", ""),
-        "JA4_r extension section mismatch (0xca34 excluded)"
+        real[2].replace("ca34,", "").replace("0029,", ""),
+        "JA4_r extension section mismatch (0xca34 and 0x0029/PSK excluded)"
     );
 
-    // peetprint: the final pipe-section is the sorted extension list; drop
-    // 51764 from the real value before comparing.
+    // peetprint: the final pipe-section is the sorted extension list; drop the
+    // two extensions roxy cannot reproduce on a cold connection — 51764 (no
+    // wreq knob) and 41 (pre_shared_key, session-resumption only). See the
+    // JA4_r comment above.
     assert_eq!(
         got_peet,
-        REAL_CHROME_148_PEETPRINT.replace("-51764", ""),
-        "peetprint mismatch (51764 excluded)"
+        REAL_CHROME_148_PEETPRINT
+            .replace("-51764", "")
+            .replace("-41-", "-"),
+        "peetprint mismatch (51764 and 41/PSK excluded)"
     );
 
     drop(dir);
