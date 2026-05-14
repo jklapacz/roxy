@@ -50,6 +50,12 @@ pub struct CapturedTls {
     pub record_size_limit: Option<u16>,
     /// pre_shared_key extension observed. Detection only — not emitted by render; a later task best-guesses the schema's pre_shared_key toggle from this.
     pub pre_shared_key_seen: bool,
+    /// Protocols advertised in the ALPS (application_settings) extension.
+    pub alps_protocols: Vec<String>,
+    /// True when ALPS was signalled via the new codepoint (17613) rather than the original (17513).
+    pub alps_use_new_codepoint: bool,
+    /// Compression algorithm names from the compress_certificate extension.
+    pub cert_compression: Vec<String>,
 }
 
 /// Parse the first TLS record in `record` as a ClientHello.
@@ -95,6 +101,10 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
     let mut renegotiation = false;
     let mut record_size_limit: Option<u16> = None;
     let mut pre_shared_key_seen = false;
+    // --- ALPS / cert-compression ---
+    let mut alps_protocols: Vec<String> = Vec::new();
+    let mut alps_use_new_codepoint = false;
+    let mut cert_compression: Vec<String> = Vec::new();
 
     if let Some(ext_bytes) = ch.ext {
         let (_, exts) = parse_tls_client_hello_extensions(ext_bytes)
@@ -108,6 +118,15 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
             let ty: u16 = TlsExtensionType::from(ext).0;
             if ty == 65037 {
                 enable_ech_grease = true;
+            }
+            match ty {
+                17513 => alps_protocols = parse_alpn_list(unknown_data(ext)),
+                17613 => {
+                    alps_protocols = parse_alpn_list(unknown_data(ext));
+                    alps_use_new_codepoint = true;
+                }
+                27 => cert_compression = parse_cert_compression(unknown_data(ext)),
+                _ => {}
             }
             match extension_name(ty) {
                 Some(name) => extensions.push(name.to_string()),
@@ -184,6 +203,9 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
         renegotiation,
         record_size_limit,
         pre_shared_key_seen,
+        alps_protocols,
+        alps_use_new_codepoint,
+        cert_compression,
     })
 }
 
@@ -272,6 +294,59 @@ fn sigalg_name(v: u16) -> Option<&'static str> {
     })
 }
 
+/// Parse an ALPN-style protocol list: 2-byte list length, then a sequence of
+/// (1-byte length, protocol bytes). Used for both ALPN and ALPS extension data.
+fn parse_alpn_list(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if data.len() < 2 {
+        return out;
+    }
+    let mut i = 2; // skip the 2-byte list length
+    while i < data.len() {
+        let len = data[i] as usize;
+        i += 1;
+        if i + len > data.len() {
+            break;
+        }
+        if let Ok(s) = std::str::from_utf8(&data[i..i + len]) {
+            out.push(s.to_string());
+        }
+        i += len;
+    }
+    out
+}
+
+/// Parse `compress_certificate` data: 1-byte count of following bytes, then
+/// 2-byte algorithm ids. `1 → zlib`, `2 → brotli`, `3 → zstd`.
+fn parse_cert_compression(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    if data.is_empty() {
+        return out;
+    }
+    let mut i = 1; // skip the 1-byte length
+    while i + 1 < data.len() {
+        let alg = u16::from_be_bytes([data[i], data[i + 1]]);
+        i += 2;
+        let name = match alg {
+            1 => "zlib",
+            2 => "brotli",
+            3 => "zstd",
+            _ => continue,
+        };
+        out.push(name.to_string());
+    }
+    out
+}
+
+/// Raw extension payload for a `TlsExtension::Unknown`; empty slice for typed
+/// variants (which we never call this on).
+fn unknown_data<'a>(ext: &'a TlsExtension) -> &'a [u8] {
+    match ext {
+        TlsExtension::Unknown(_, data) => data,
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +368,20 @@ mod tests {
         ] {
             assert!(!is_grease(v), "{v:#06x} should not be GREASE");
         }
+    }
+
+    #[test]
+    fn parses_alps_protocol_list() {
+        // ALPS data: 2-byte list length, then [1-byte len + bytes]...
+        let data = [0x00, 0x03, 0x02, b'h', b'2'];
+        assert_eq!(parse_alpn_list(&data), vec!["h2".to_string()]);
+    }
+
+    #[test]
+    fn parses_cert_compression_algorithms() {
+        // compress_certificate data: 1-byte count-of-bytes, then 2-byte alg ids.
+        let data = [0x02, 0x00, 0x02];
+        assert_eq!(parse_cert_compression(&data), vec!["brotli".to_string()]);
     }
 
     #[test]

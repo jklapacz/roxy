@@ -97,6 +97,22 @@ pub fn render(
     if let Some(limit) = tls.record_size_limit {
         out.push_str(&format!("record_size_limit = {limit}\n"));
     }
+    if !tls.alps_protocols.is_empty() {
+        out.push_str(&format!(
+            "alps_protocols = {}\n",
+            string_array(&tls.alps_protocols)
+        ));
+        out.push_str(&format!(
+            "alps_use_new_codepoint = {}\n",
+            tls.alps_use_new_codepoint
+        ));
+    }
+    if !tls.cert_compression.is_empty() {
+        out.push_str(&format!(
+            "cert_compression = {}\n",
+            string_array(&tls.cert_compression)
+        ));
+    }
     out.push('\n');
 
     out.push_str("[http2]\n");
@@ -193,6 +209,9 @@ mod tests {
             renegotiation: false,
             record_size_limit: None,
             pre_shared_key_seen: false,
+            alps_protocols: vec![],
+            alps_use_new_codepoint: false,
+            cert_compression: vec![],
         }
     }
 
