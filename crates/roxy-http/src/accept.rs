@@ -34,30 +34,45 @@ pub async fn run(
         let terminator = terminator.clone();
         let handler = handler.clone();
         tokio::spawn(async move {
-            let host = match read_connect(&mut sock).await {
-                Ok(Some(h)) => h,
-                Ok(None) => {
-                    warn!(?peer, "non-CONNECT first request dropped");
-                    return;
-                }
+            let mut peek_buf = [0u8; 8];
+            let n = match sock.peek(&mut peek_buf).await {
+                Ok(n) => n,
                 Err(e) => {
-                    warn!(?peer, error = %e, "read_connect failed");
+                    warn!(?peer, error = %e, "peek failed");
                     return;
                 }
             };
-            if let Err(e) = write_200(&mut sock).await {
-                warn!(?peer, error = %e, "write 200 failed");
-                return;
+            if n >= 8 && &peek_buf == b"CONNECT " {
+                // CONNECT flow: tunneled HTTPS via MITM.
+                let host = match read_connect(&mut sock).await {
+                    Ok(Some(h)) => h,
+                    Ok(None) => {
+                        // Shouldn't happen — peek already confirmed CONNECT.
+                        warn!(?peer, "peek said CONNECT but read_connect returned None");
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(?peer, error = %e, "read_connect failed");
+                        return;
+                    }
+                };
+                if let Err(e) = write_200(&mut sock).await {
+                    warn!(?peer, error = %e, "write 200 failed");
+                    return;
+                }
+                let acceptor = terminator.acceptor();
+                let tls = match acceptor.accept(sock).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(?peer, error = %e, "TLS handshake failed");
+                        return;
+                    }
+                };
+                handler.handle_tunneled(host, tls).await;
+            } else {
+                // Plain HTTP flow: absolute-form HTTP requests, no TLS.
+                handler.handle_plain(sock).await;
             }
-            let acceptor = terminator.acceptor();
-            let tls = match acceptor.accept(sock).await {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(?peer, error = %e, "TLS handshake failed");
-                    return;
-                }
-            };
-            handler.handle_tunneled(host, tls).await;
         });
     }
 }
