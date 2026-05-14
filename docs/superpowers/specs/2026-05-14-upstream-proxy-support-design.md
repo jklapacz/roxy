@@ -169,11 +169,15 @@ endpoint.
 
 - **Config-time** (malformed / non-http proxy URI) → `ConfigError`; roxy exits
   at startup with a clear message.
-- **rustls path runtime** — new `UpstreamError::ProxyConnect(String)` variant
-  covering: proxy unreachable, CONNECT returned non-200 (status included in the
-  message, e.g. `proxy returned 407`), tunnel closed mid-handshake, header
-  block over the cap. Surfaces as **502** to the client — same treatment as
-  `UnknownFingerprint` today.
+- **rustls path runtime** — proxy failures (proxy unreachable, CONNECT
+  returned non-200, tunnel closed mid-handshake, header block over the cap)
+  originate in the `ProxyConnector` and are surfaced by hyper-util's legacy
+  `Client` as `UpstreamError::Client`. No dedicated `UpstreamError` variant is
+  added: the connector error would be opaque inside `legacy::Error`, and
+  extracting a typed variant would require fragile error-chain inspection. The
+  outcome is unchanged — a **502** to the client (same as any other
+  `UpstreamError::Client`), and the connector's error string (e.g. `upstream
+  proxy refused CONNECT: status 407`) is carried in the error's source chain.
 - **wreq path runtime** — proxy failures fold into the existing
   `ImpersonateError::Wreq` variant → also **502**. No new variant needed.
 - **Credentials never logged.** Tracing on the proxy path logs `host:port`
