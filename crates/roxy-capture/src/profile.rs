@@ -401,4 +401,33 @@ mod tests {
             "toml:\n{toml}"
         );
     }
+
+    #[test]
+    fn non_grease_psk_seen_emits_plain_pre_shared_key() {
+        let mut tls = sample_tls();
+        tls.grease = false;
+        tls.pre_shared_key_seen = true;
+        let toml = render(
+            &ProfileName::parse("captured-ngrease-psk").unwrap(),
+            &tls,
+            Some(&sample_http2()),
+            Some(b"h2"),
+        );
+        assert!(toml.contains("pre_shared_key = true\n"), "toml:\n{toml}");
+        assert!(!toml.contains("# guessed"), "toml:\n{toml}");
+    }
+
+    #[test]
+    fn non_grease_empty_extensions_omits_extension_permutation() {
+        let mut tls = sample_tls();
+        tls.grease = false;
+        tls.extensions = vec![];
+        let toml = render(
+            &ProfileName::parse("captured-ngrease-empty").unwrap(),
+            &tls,
+            Some(&sample_http2()),
+            Some(b"h2"),
+        );
+        assert!(!toml.contains("extension_permutation"), "toml:\n{toml}");
+    }
 }

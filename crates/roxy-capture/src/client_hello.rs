@@ -25,6 +25,9 @@ use tls_parser::{
 pub struct CapturedTls {
     pub alpn: Vec<String>,
     pub cipher_suites: Vec<String>,
+    /// Ordered list of recognized extension identifiers from the ClientHello.
+    /// Fed into `extension_permutation` by `render`, but only for non-GREASE
+    /// clients (GREASE clients use `permute_extensions = true` instead).
     pub extensions: Vec<String>,
     pub supported_versions: Vec<String>,
     pub signature_algorithms: Vec<String>,
@@ -48,7 +51,9 @@ pub struct CapturedTls {
     pub renegotiation: bool,
     /// record_size_limit extension value, if present.
     pub record_size_limit: Option<u16>,
-    /// pre_shared_key extension observed. Detection only — not emitted by render; a later task best-guesses the schema's pre_shared_key toggle from this.
+    /// pre_shared_key extension observed on the wire. `render` uses this together
+    /// with `grease` to decide whether to emit a plain `pre_shared_key = true`
+    /// (observed directly) or a guessed one with an inline comment.
     pub pre_shared_key_seen: bool,
     /// Protocols advertised in the ALPS (application_settings) extension.
     pub alps_protocols: Vec<String>,
