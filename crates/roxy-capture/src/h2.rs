@@ -66,6 +66,13 @@ const FLAG_ACK: u8 = 0x1;
 const FLAG_PADDED: u8 = 0x8;
 const FLAG_PRIORITY: u8 = 0x20;
 
+/// RFC 9113 §6.9.2: an HTTP/2 connection's flow-control window starts at 65535.
+/// A client that wants a larger connection window sends a connection-level
+/// WINDOW_UPDATE with increment `target - 65535`. wreq's
+/// `initial_connection_window_size` is that *target*, so capture converts the
+/// observed wire increment back: `target = 65535 + increment`.
+const H2_DEFAULT_CONNECTION_WINDOW: u32 = 65_535;
+
 /// Parse recorded client→server bytes into a `CapturedHttp2`.
 ///
 /// Returns `None` when the bytes do not start with the HTTP/2 preface (i.e. the
@@ -132,7 +139,10 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
                 if stream_id == 0 && body.len() >= 4 {
                     let inc =
                         u32::from_be_bytes([body[0], body[1], body[2], body[3]]) & 0x7fff_ffff;
-                    initial_connection_window_size = Some(inc);
+                    // The wire value is an *increment* over the RFC default
+                    // window; store the absolute target wreq expects.
+                    initial_connection_window_size =
+                        Some(inc.saturating_add(H2_DEFAULT_CONNECTION_WINDOW));
                 }
             }
             _ => {}
@@ -326,7 +336,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(PREFACE);
         buf.extend_from_slice(&frame(FRAME_SETTINGS, 0, &settings_body(&[(0x2, 0)])));
-        // WINDOW_UPDATE frame, stream 0, increment 15663105 (0x00EF0001).
+        // WINDOW_UPDATE frame, stream 0, wire increment 15663105 (0x00EF0001).
         let mut wu = vec![0, 0, 4, 0x8, 0, 0, 0, 0, 0];
         wu.extend_from_slice(&15663105u32.to_be_bytes());
         buf.extend_from_slice(&wu);
@@ -336,7 +346,9 @@ mod tests {
             &hpack_block(&[(":method", "GET")]),
         ));
         let h2 = parse_http2(&buf).expect("should parse");
-        assert_eq!(h2.initial_connection_window_size, Some(15663105));
+        // The wire increment grows the window from the RFC 9113 default (65535);
+        // `initial_connection_window_size` is the absolute target wreq expects.
+        assert_eq!(h2.initial_connection_window_size, Some(15663105 + 65_535));
     }
 
     #[test]
@@ -358,7 +370,7 @@ mod tests {
             &hpack_block(&[(":method", "GET")]),
         ));
         let h2 = parse_http2(&buf).expect("should parse");
-        assert_eq!(h2.initial_connection_window_size, Some(15663105));
+        assert_eq!(h2.initial_connection_window_size, Some(15663105 + 65_535));
     }
 
     #[test]

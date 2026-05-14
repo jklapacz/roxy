@@ -2,10 +2,10 @@
 #![allow(clippy::expect_used)]
 
 //! Ring 3 fidelity gate: a known-good chrome-148 profile, replayed through
-//! roxy, must reproduce real Chrome 148's JA4_r and peetprint — except for two
-//! extensions roxy cannot reproduce on a cold connection: TLS extension 51764
-//! (0xca34, no wreq knob) and 0x0029/41 (pre_shared_key, only sent on TLS 1.3
-//! session resumption).
+//! roxy, must reproduce real Chrome 148's JA4_r, peetprint, and HTTP/2 akamai
+//! fingerprint — except for two TLS extensions roxy cannot reproduce on a cold
+//! connection: extension 51764 (0xca34, no wreq knob) and 0x0029/41
+//! (pre_shared_key, only sent on TLS 1.3 session resumption).
 //!
 //! `#[ignore]` because it requires public network access. Run with:
 //!   cargo test -p roxy-proxy --test fingerprint_fidelity -- --ignored --nocapture
@@ -17,13 +17,20 @@ use roxy_proxy_lib::handler::FINGERPRINT_HEADER;
 use serde_json::Value;
 
 // To re-capture for a new Chrome version: visit https://tls.peet.ws/api/all in
-// real Chrome and copy `.tls.ja4_r` / `.tls.peetprint` from the JSON response.
+// real Chrome and copy `.tls.ja4_r`, `.tls.peetprint`, and
+// `.http2.akamai_fingerprint` from the JSON response.
 
 /// JA4_r of real Chrome 148 against tls.peet.ws, recorded 2026-05-14.
 const REAL_CHROME_148_JA4R: &str = "t13d1518h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,0029,002b,002d,0033,44cd,ca34,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601";
 
 /// peetprint of real Chrome 148 against tls.peet.ws, recorded 2026-05-14.
 const REAL_CHROME_148_PEETPRINT: &str = "GREASE-772-771|2-1.1|GREASE-4588-29-23-24|1027-2052-1025-1283-2053-1281-2054-1537|1|2|GREASE-4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53|0-10-11-13-16-17613-18-23-27-35-41-43-45-5-51-51764-65037-65281-GREASE-GREASE";
+
+/// HTTP/2 akamai fingerprint of real Chrome 148 against tls.peet.ws, recorded
+/// 2026-05-14. Format: `SETTINGS|WINDOW_UPDATE|PRIORITY|HEADER_ORDER` — every
+/// component is deterministic for Chrome (no per-connection randomness, no
+/// TLS-side exclusions), so it is compared verbatim.
+const REAL_CHROME_148_AKAMAI: &str = "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p";
 
 /// Known-good chrome-148 profile, derived from the real Chrome 148 ClientHello
 /// + HTTP/2 reference capture in the design doc. New-schema format.
@@ -53,7 +60,10 @@ cert_compression = ["brotli"]
 header_table_size = 65536
 enable_push = false
 initial_window_size = 6291456
-initial_connection_window_size = 15663105
+# Target connection window: real Chrome's WINDOW_UPDATE wire increment
+# (15663105) plus the RFC 9113 default window (65535). wreq emits
+# `target - 65535` on the wire.
+initial_connection_window_size = 15728640
 max_header_list_size = 262144
 settings_order = ["HEADER_TABLE_SIZE", "ENABLE_PUSH", "INITIAL_WINDOW_SIZE", "MAX_HEADER_LIST_SIZE"]
 header_order = [":method", ":authority", ":scheme", ":path"]
@@ -145,5 +155,18 @@ async fn captured_chrome_148_matches_real_ja4r_and_peetprint() {
     assert_eq!(
         got_peet, cleaned_peet,
         "peetprint mismatch (51764 and 41/PSK excluded)"
+    );
+
+    // HTTP/2 akamai fingerprint — every component is deterministic for Chrome,
+    // so it is compared verbatim (this is what catches HTTP/2-layer drift such
+    // as a wrong WINDOW_UPDATE increment).
+    let got_akamai = json
+        .get("http2")
+        .and_then(|h| h.get("akamai_fingerprint"))
+        .and_then(|v| v.as_str())
+        .expect("http2.akamai_fingerprint");
+    assert_eq!(
+        got_akamai, REAL_CHROME_148_AKAMAI,
+        "HTTP/2 akamai fingerprint mismatch"
     );
 }
