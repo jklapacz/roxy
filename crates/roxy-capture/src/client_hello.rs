@@ -254,6 +254,7 @@ fn extension_name(ty: u16) -> Option<&'static str> {
         50 => "signature_algorithms_cert",
         51 => "key_share",
         17513 => "application_settings",
+        17613 => "application_settings_new",
         65037 => "encrypted_client_hello",
         65281 => "renegotiation_info",
         _ => return None,
@@ -295,7 +296,7 @@ fn sigalg_name(v: u16) -> Option<&'static str> {
 }
 
 /// Parse an ALPN-style protocol list: 2-byte list length, then a sequence of
-/// (1-byte length, protocol bytes). Used for both ALPN and ALPS extension data.
+/// (1-byte length, protocol bytes). Used for ALPS extension data (same wire shape as ALPN).
 fn parse_alpn_list(data: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     if data.len() < 2 {
@@ -316,8 +317,9 @@ fn parse_alpn_list(data: &[u8]) -> Vec<String> {
     out
 }
 
-/// Parse `compress_certificate` data: 1-byte count of following bytes, then
-/// 2-byte algorithm ids. `1 → zlib`, `2 → brotli`, `3 → zstd`.
+/// Parse `compress_certificate` (RFC 8879) data: 1-byte algorithm-bytes length
+/// (skipped — we read to end-of-buffer), then 2-byte algorithm ids.
+/// `1 → zlib`, `2 → brotli`, `3 → zstd`.
 fn parse_cert_compression(data: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     if data.is_empty() {
@@ -339,11 +341,15 @@ fn parse_cert_compression(data: &[u8]) -> Vec<String> {
 }
 
 /// Raw extension payload for a `TlsExtension::Unknown`; empty slice for typed
-/// variants (which we never call this on).
+/// variants. Callers must only pass `Unknown` variants — the `debug_assert`
+/// catches misuse in debug builds.
 fn unknown_data<'a>(ext: &'a TlsExtension) -> &'a [u8] {
     match ext {
         TlsExtension::Unknown(_, data) => data,
-        _ => &[],
+        _ => {
+            debug_assert!(false, "unknown_data called on typed variant");
+            &[]
+        }
     }
 }
 
@@ -382,6 +388,27 @@ mod tests {
         // compress_certificate data: 1-byte count-of-bytes, then 2-byte alg ids.
         let data = [0x02, 0x00, 0x02];
         assert_eq!(parse_cert_compression(&data), vec!["brotli".to_string()]);
+    }
+
+    #[test]
+    fn alpn_list_handles_malformed_input() {
+        // Too short to contain the 2-byte list-length prefix.
+        assert!(parse_alpn_list(&[]).is_empty());
+        assert!(parse_alpn_list(&[0x00]).is_empty());
+        // Declared protocol length (16) runs past the buffer → break, no panic.
+        assert!(parse_alpn_list(&[0x00, 0x05, 0x10, b'h', b'2']).is_empty());
+    }
+
+    #[test]
+    fn cert_compression_handles_malformed_input() {
+        assert!(parse_cert_compression(&[]).is_empty());
+        // Only the length byte, no algorithm bytes → empty, no panic.
+        assert!(parse_cert_compression(&[0x04]).is_empty());
+        // Declared 4 bytes but only one 2-byte id follows → reads zlib, no panic.
+        assert_eq!(
+            parse_cert_compression(&[0x04, 0x00, 0x01]),
+            vec!["zlib".to_string()]
+        );
     }
 
     #[test]
