@@ -117,8 +117,9 @@ impl UpstreamClient {
     /// Send a request with a streaming [`ClientBody`].
     pub async fn send(
         &self,
-        req: Request<ClientBody>,
+        mut req: Request<ClientBody>,
     ) -> Result<Response<UpstreamBody>, UpstreamError> {
+        normalize_upstream_version(&mut req);
         let resp = self.inner.request(req).await?;
         let (parts, body) = resp.into_parts();
         Ok(Response::from_parts(parts, UpstreamBody::hyper(body)))
@@ -132,9 +133,24 @@ impl UpstreamClient {
     ) -> Result<Response<UpstreamBody>, UpstreamError> {
         let (parts, body) = req.into_parts();
         let body: ClientBody = body.map_err(|never| match never {}).boxed();
-        let req = Request::from_parts(parts, body);
+        let mut req = Request::from_parts(parts, body);
+        normalize_upstream_version(&mut req);
         let resp = self.inner.request(req).await?;
         let (parts, body) = resp.into_parts();
         Ok(Response::from_parts(parts, UpstreamBody::hyper(body)))
     }
+}
+
+/// Normalize the upstream request's HTTP version to `HTTP/1.1`.
+///
+/// The browser↔roxy hop and the roxy↔origin hop negotiate their transport
+/// protocols independently (each via its own TLS ALPN). A request that reached
+/// roxy over HTTP/2 carries `version = HTTP_2`, but hyper-util's legacy `Client`
+/// treats `HTTP_2` as a *hard requirement* — it fails with
+/// `UserUnsupportedVersion` if the upstream connection ALPN-negotiates
+/// HTTP/1.1. Resetting to `HTTP_11` (the neutral "no specific version required"
+/// value) lets the legacy client use whatever the upstream connection
+/// negotiated — it still uses h2 when ALPN selects it.
+fn normalize_upstream_version<B>(req: &mut Request<B>) {
+    *req.version_mut() = http::Version::HTTP_11;
 }
