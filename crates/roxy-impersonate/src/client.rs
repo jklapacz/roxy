@@ -286,15 +286,14 @@ name = "chrome-137"
 [tls]
 alpn = ["h2"]
 cipher_suites = ["TLS_AES_128_GCM_SHA256"]
-extensions = ["server_name"]
-supported_versions = ["TLS1.3"]
 signature_algorithms = ["ecdsa_secp256r1_sha256"]
+supported_versions = ["TLS1.3"]
+supported_groups = ["X25519"]
 
 [http2]
 header_table_size = 65536
 enable_push = false
 initial_window_size = 6291456
-max_frame_size = 16384
 max_header_list_size = 262144
 settings_order = ["HEADER_TABLE_SIZE"]
 header_order = [":method"]

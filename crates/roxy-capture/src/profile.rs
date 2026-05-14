@@ -44,6 +44,13 @@ pub fn render(
                 .join(", "),
         ));
     }
+    if !tls.skipped_curves.is_empty() {
+        out.push_str(&format!(
+            "# NOTE: {} named group(s) were unrecognized and omitted: {}\n",
+            tls.skipped_curves.len(),
+            join_nums(&tls.skipped_curves),
+        ));
+    }
     out.push('\n');
     out.push_str(&format!("name = {}\n\n", quote(name.as_str())));
 
@@ -53,15 +60,19 @@ pub fn render(
         "cipher_suites = {}\n",
         string_array(&tls.cipher_suites)
     ));
-    out.push_str(&format!("extensions = {}\n", string_array(&tls.extensions)));
+    out.push_str(&format!(
+        "signature_algorithms = {}\n",
+        string_array(&tls.signature_algorithms)
+    ));
     out.push_str(&format!(
         "supported_versions = {}\n",
         string_array(&tls.supported_versions)
     ));
     out.push_str(&format!(
-        "signature_algorithms = {}\n\n",
-        string_array(&tls.signature_algorithms)
+        "supported_groups = {}\n",
+        string_array(&tls.supported_groups)
     ));
+    out.push('\n');
 
     out.push_str("[http2]\n");
     match http2 {
@@ -94,7 +105,6 @@ pub fn render(
             out.push_str("header_table_size = 65536\n");
             out.push_str("enable_push = false\n");
             out.push_str("initial_window_size = 6291456\n");
-            out.push_str("max_frame_size = 16384\n");
             out.push_str("max_header_list_size = 262144\n");
             out.push_str(
                 "settings_order = [\"HEADER_TABLE_SIZE\", \"ENABLE_PUSH\", \
@@ -146,6 +156,8 @@ mod tests {
             extensions: vec!["server_name".into(), "supported_groups".into()],
             supported_versions: vec!["TLS1.3".into(), "TLS1.2".into()],
             signature_algorithms: vec!["ecdsa_secp256r1_sha256".into()],
+            supported_groups: vec!["X25519".into(), "P-256".into()],
+            skipped_curves: vec![],
             skipped_extensions: vec![],
             skipped_ciphers: vec![],
         }
@@ -181,6 +193,7 @@ mod tests {
             profile.spec.tls.cipher_suites,
             vec!["TLS_AES_128_GCM_SHA256"]
         );
+        assert_eq!(profile.spec.tls.supported_groups, vec!["X25519", "P-256"]);
     }
 
     #[test]

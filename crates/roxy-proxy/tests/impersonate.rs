@@ -212,8 +212,6 @@ cipher_suites = [
     "ECDHE-ECDSA-CHACHA20-POLY1305",
     "ECDHE-RSA-CHACHA20-POLY1305",
 ]
-extensions = ["server_name", "supported_groups", "key_share", "supported_versions"]
-supported_versions = ["TLS1.3", "TLS1.2"]
 signature_algorithms = [
     "ecdsa_secp256r1_sha256",
     "rsa_pss_rsae_sha256",
@@ -221,12 +219,13 @@ signature_algorithms = [
     "rsa_pss_rsae_sha384",
     "rsa_pkcs1_sha384",
 ]
+supported_versions = ["TLS1.3", "TLS1.2"]
+supported_groups = ["X25519", "P-256", "P-384"]
 
 [http2]
 header_table_size = 65536
 enable_push = false
 initial_window_size = 6291456
-max_frame_size = 16384
 max_header_list_size = 262144
 settings_order = ["HEADER_TABLE_SIZE", "ENABLE_PUSH", "INITIAL_WINDOW_SIZE"]
 header_order = [":method", ":authority", ":scheme", ":path"]

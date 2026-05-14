@@ -28,6 +28,8 @@ pub struct CapturedTls {
     pub extensions: Vec<String>,
     pub supported_versions: Vec<String>,
     pub signature_algorithms: Vec<String>,
+    pub supported_groups: Vec<String>,
+    pub skipped_curves: Vec<u16>,
     /// Extension type numbers seen on the wire that have no roxy identifier.
     pub skipped_extensions: Vec<u16>,
     /// Cipher suite ids seen on the wire that `tls-parser` could not name.
@@ -65,6 +67,8 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
     let mut supported_versions = Vec::new();
     let mut signature_algorithms = Vec::new();
     let mut alpn = Vec::new();
+    let mut supported_groups = Vec::new();
+    let mut skipped_curves = Vec::new();
 
     if let Some(ext_bytes) = ch.ext {
         let (_, exts) = parse_tls_client_hello_extensions(ext_bytes)
@@ -107,6 +111,17 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
                         }
                     }
                 }
+                TlsExtension::EllipticCurves(groups) => {
+                    for g in groups {
+                        if is_grease(g.0) {
+                            continue;
+                        }
+                        match curve_name(g.0) {
+                            Some(name) => supported_groups.push(name.to_string()),
+                            None => skipped_curves.push(g.0),
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -118,6 +133,8 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
         extensions,
         supported_versions,
         signature_algorithms,
+        supported_groups,
+        skipped_curves,
         skipped_extensions,
         skipped_ciphers,
     })
@@ -126,6 +143,19 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
 /// RFC 8701 GREASE values: both bytes equal and of the form `0x?A`.
 fn is_grease(v: u16) -> bool {
     (v & 0x0f0f) == 0x0a0a && (v >> 8) == (v & 0x00ff)
+}
+
+/// Named-group number → wreq `curves_list` identifier.
+fn curve_name(group: u16) -> Option<&'static str> {
+    Some(match group {
+        23 => "P-256",
+        24 => "P-384",
+        25 => "P-521",
+        29 => "X25519",
+        4587 => "X25519Kyber768Draft00",
+        4588 => "X25519MLKEM768",
+        _ => return None,
+    })
 }
 
 /// Extension type number → the lowercase identifier `custom.rs`'s

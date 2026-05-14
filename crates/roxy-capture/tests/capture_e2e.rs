@@ -80,8 +80,8 @@ async fn captures_real_browser_fingerprint_into_loadable_profile() {
         "captured cipher_suites should not be empty"
     );
     assert!(
-        !profile.spec.tls.extensions.is_empty(),
-        "captured extensions should not be empty"
+        !profile.spec.tls.supported_groups.is_empty(),
+        "captured supported_groups should not be empty"
     );
     // Chrome emulation negotiates HTTP/2, so the http2 block must be real
     // (the loader rejects empty settings_order / header_order).

@@ -93,9 +93,9 @@ name = "smoke-custom"
 [tls]
 alpn = ["h2", "http/1.1"]
 cipher_suites = ["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"]
-extensions = ["server_name", "supported_groups", "key_share", "supported_versions", "signature_algorithms"]
 supported_versions = ["TLS1.3"]
 signature_algorithms = ["ecdsa_secp256r1_sha256", "rsa_pss_rsae_sha256"]
+supported_groups = ["X25519", "P-256", "P-384"]
 
 [http2]
 header_table_size = 4096

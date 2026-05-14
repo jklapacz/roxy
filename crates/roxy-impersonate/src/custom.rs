@@ -13,9 +13,12 @@
 //!   into a colon-separated BoringSSL cipher-list string and handed to wreq
 //!   verbatim. wreq's underlying BoringSSL parses & validates them at
 //!   connection time, not at load time.
-//! - `tls.extensions`: lowercase identifiers matching `boring2::ssl::ExtensionType`
-//!   constants (e.g. `"server_name"`, `"supported_groups"`). Translated to
-//!   typed `wreq::tls::ExtensionType` values here.
+//! - `tls.supported_groups`: named group identifiers (e.g. `"X25519"`, `"P-256"`).
+//!   Joined into a colon-separated curves-list string for wreq's `curves_list`
+//!   builder.
+//! - `tls.extension_permutation`: lowercase identifiers matching
+//!   `boring2::ssl::ExtensionType` constants (e.g. `"server_name"`). Translated
+//!   to typed `wreq::tls::ExtensionType` values here.
 //! - `tls.supported_versions`: dotted SemVer-ish strings — `"TLS1.3"`, `"TLS1.2"`,
 //!   `"TLS1.1"`, `"TLS1.0"`. The ORDERED list is informational; only the min
 //!   and max of this list are honored by wreq, and the load-time log confirms
@@ -38,34 +41,86 @@
 use crate::error::ImpersonateError;
 use serde::Deserialize;
 use std::path::Path;
-use wreq::http2::{Http2Options, PseudoId, PseudoOrder, SettingId, SettingsOrder};
-use wreq::tls::{AlpnProtocol, ExtensionType, TlsOptions, TlsVersion};
+use wreq::http2::{
+    Http2Options, PseudoId, PseudoOrder, SettingId, SettingsOrder, StreamDependency, StreamId,
+};
+use wreq::tls::{
+    AlpnProtocol, AlpsProtocol, CertificateCompressionAlgorithm, ExtensionType, TlsOptions,
+    TlsVersion,
+};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CustomProfileSpec {
     pub name: String,
     pub tls: TlsSpec,
     pub http2: Http2Spec,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Mirrors the fingerprint-relevant subset of wreq's `TlsOptionsBuilder`.
+/// Every field is optional: `build_emulation` calls a builder method only when
+/// the field is present, so anything omitted falls through to wreq's default.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
 pub struct TlsSpec {
+    // Core identity — required (validated in build_emulation).
     pub alpn: Vec<String>,
     pub cipher_suites: Vec<String>,
-    pub extensions: Vec<String>,
-    pub supported_versions: Vec<String>,
     pub signature_algorithms: Vec<String>,
+    pub supported_versions: Vec<String>,
+    pub supported_groups: Vec<String>,
+    // Feature toggles.
+    pub grease: Option<bool>,
+    pub permute_extensions: Option<bool>,
+    pub aes_hw_override: Option<bool>,
+    pub enable_ocsp_stapling: Option<bool>,
+    pub enable_signed_cert_timestamps: Option<bool>,
+    pub enable_ech_grease: Option<bool>,
+    pub session_ticket: Option<bool>,
+    pub renegotiation: Option<bool>,
+    pub pre_shared_key: Option<bool>,
+    pub psk_dhe_ke: Option<bool>,
+    pub psk_skip_session_ticket: Option<bool>,
+    pub preserve_tls13_cipher_list: Option<bool>,
+    // Typed lists / values.
+    pub alps_protocols: Vec<String>,
+    pub alps_use_new_codepoint: Option<bool>,
+    pub cert_compression: Vec<String>,
+    pub delegated_credentials: Vec<String>,
+    pub record_size_limit: Option<u16>,
+    pub key_shares_limit: Option<u8>,
+    /// Fixed extension order for non-permuting clients (Safari/okhttp). Mutually
+    /// exclusive with `permute_extensions`.
+    pub extension_permutation: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+/// Mirrors the fingerprint-relevant subset of wreq's `Http2OptionsBuilder`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Http2Spec {
-    pub header_table_size: u32,
-    pub enable_push: bool,
-    pub initial_window_size: u32,
-    pub max_frame_size: u32,
-    pub max_header_list_size: u32,
+    pub header_table_size: Option<u32>,
+    pub enable_push: Option<bool>,
+    pub max_concurrent_streams: Option<u32>,
+    pub initial_window_size: Option<u32>,
+    pub initial_connection_window_size: Option<u32>,
+    pub max_frame_size: Option<u32>,
+    pub max_header_list_size: Option<u32>,
+    pub enable_connect_protocol: Option<bool>,
+    pub no_rfc7540_priorities: Option<bool>,
+    // Required (validated in build_emulation).
     pub settings_order: Vec<String>,
     pub header_order: Vec<String>,
+    pub headers_stream_dependency: Option<HeadersStreamDependency>,
+}
+
+/// Priority info carried on the first HEADERS frame.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HeadersStreamDependency {
+    pub stream_id: u32,
+    /// Raw wire weight byte (0–255). HTTP/2 displays this as `weight + 1`.
+    pub weight: u8,
+    pub exclusive: bool,
 }
 
 /// A parsed + validated custom profile, ready to be plugged into wreq.
@@ -137,61 +192,42 @@ impl CustomProfile {
 }
 
 fn build_emulation(spec: &CustomProfileSpec) -> Result<wreq::Emulation, anyhow::Error> {
-    if spec.tls.cipher_suites.is_empty() {
+    let tls = &spec.tls;
+    let http2 = &spec.http2;
+
+    // ----- validation: core identity must be present -----
+    if tls.cipher_suites.is_empty() {
         anyhow::bail!("tls.cipher_suites must not be empty");
     }
-    if spec.tls.extensions.is_empty() {
-        anyhow::bail!("tls.extensions must not be empty");
+    if tls.signature_algorithms.is_empty() {
+        anyhow::bail!("tls.signature_algorithms must not be empty");
     }
-    if spec.http2.settings_order.is_empty() {
+    if tls.supported_groups.is_empty() {
+        anyhow::bail!("tls.supported_groups must not be empty");
+    }
+    if tls.alpn.is_empty() {
+        anyhow::bail!("tls.alpn must not be empty");
+    }
+    if http2.settings_order.is_empty() {
         anyhow::bail!("http2.settings_order must not be empty");
     }
-    if spec.http2.header_order.is_empty() {
+    if http2.header_order.is_empty() {
         anyhow::bail!("http2.header_order must not be empty");
     }
 
-    // ALPN translation.
-    let alpn: Vec<AlpnProtocol> = spec
-        .tls
+    // ----- TLS -----
+    let alpn: Vec<AlpnProtocol> = tls
         .alpn
         .iter()
-        .map(|s| match s.as_str() {
-            "h2" => Ok(AlpnProtocol::HTTP2),
-            "http/1.1" => Ok(AlpnProtocol::HTTP1),
-            "h3" => Ok(AlpnProtocol::HTTP3),
-            other => Err(anyhow::anyhow!("unknown alpn protocol: {other}")),
-        })
+        .map(|s| alpn_from_str(s))
         .collect::<Result<_, _>>()?;
 
-    // Extensions: typed list, ordered.
-    let extensions: Vec<ExtensionType> = spec
-        .tls
-        .extensions
-        .iter()
-        .map(|s| extension_from_str(s))
-        .collect::<Result<_, _>>()?;
-
-    // Supported versions: wreq accepts min/max bounds. The spec gives an
-    // ordered list (e.g. `["TLS1.3", "TLS1.2"]`); we pick the min/max of the
-    // parsed values rather than honoring order, because wreq has no ordered
-    // version-list knob.
-    let parsed_versions: Vec<TlsVersion> = spec
-        .tls
+    let parsed_versions: Vec<TlsVersion> = tls
         .supported_versions
         .iter()
         .map(|s| tls_version_from_str(s))
         .collect::<Result<_, _>>()?;
-    let (min_v, max_v) = if parsed_versions.is_empty() {
-        (None, None)
-    } else {
-        let by_rank = |v: &TlsVersion| tls_version_rank(*v);
-        let mut sorted = parsed_versions.clone();
-        sorted.sort_by_key(by_rank);
-        (sorted.first().copied(), sorted.last().copied())
-    };
-    // Surface the resolved bounds so operators reading `supported_versions`
-    // can confirm what wreq actually applied (the ORDERED list is collapsed
-    // to min/max; order is informational only).
+    let (min_v, max_v) = version_bounds(&parsed_versions);
     tracing::info!(
         profile = %spec.name,
         min = ?min_v,
@@ -199,48 +235,114 @@ fn build_emulation(spec: &CustomProfileSpec) -> Result<wreq::Emulation, anyhow::
         "custom profile: tls version bounds resolved from supported_versions"
     );
 
-    // Cipher list: BoringSSL parses a colon-separated mini-language string.
-    // We hand the user-supplied IANA names through verbatim; BoringSSL accepts
-    // standard IANA names like `TLS_AES_128_GCM_SHA256`. Errors surface at
-    // connection time, not load time — same behavior as the wreq-util builtin
-    // profiles.
-    let cipher_list = spec.tls.cipher_suites.join(":");
-
-    // Signature algorithms: same colon-separated convention.
-    let sigalgs_list = spec.tls.signature_algorithms.join(":");
-
     let mut tls_builder = TlsOptions::builder()
         .alpn_protocols(alpn)
-        .extension_permutation(extensions)
-        .cipher_list(cipher_list)
-        .preserve_tls13_cipher_list(true);
-    if !sigalgs_list.is_empty() {
-        tls_builder = tls_builder.sigalgs_list(sigalgs_list);
+        .cipher_list(tls.cipher_suites.join(":"))
+        .sigalgs_list(tls.signature_algorithms.join(":"))
+        .curves_list(tls.supported_groups.join(":"))
+        .preserve_tls13_cipher_list(tls.preserve_tls13_cipher_list.unwrap_or(true));
+
+    if let Some(v) = min_v {
+        tls_builder = tls_builder.min_tls_version(v);
     }
-    if let Some(min) = min_v {
-        tls_builder = tls_builder.min_tls_version(min);
+    if let Some(v) = max_v {
+        tls_builder = tls_builder.max_tls_version(v);
     }
-    if let Some(max) = max_v {
-        tls_builder = tls_builder.max_tls_version(max);
+
+    if let Some(b) = tls.grease {
+        tls_builder = tls_builder.grease_enabled(b);
     }
+    if let Some(b) = tls.permute_extensions {
+        tls_builder = tls_builder.permute_extensions(b);
+    }
+    if let Some(b) = tls.aes_hw_override {
+        tls_builder = tls_builder.aes_hw_override(b);
+    }
+    if let Some(b) = tls.enable_ocsp_stapling {
+        tls_builder = tls_builder.enable_ocsp_stapling(b);
+    }
+    if let Some(b) = tls.enable_signed_cert_timestamps {
+        tls_builder = tls_builder.enable_signed_cert_timestamps(b);
+    }
+    if let Some(b) = tls.enable_ech_grease {
+        tls_builder = tls_builder.enable_ech_grease(b);
+    }
+    if let Some(b) = tls.session_ticket {
+        tls_builder = tls_builder.session_ticket(b);
+    }
+    if let Some(b) = tls.renegotiation {
+        tls_builder = tls_builder.renegotiation(b);
+    }
+    if let Some(b) = tls.pre_shared_key {
+        tls_builder = tls_builder.pre_shared_key(b);
+    }
+    if let Some(b) = tls.psk_dhe_ke {
+        tls_builder = tls_builder.psk_dhe_ke(b);
+    }
+    if let Some(b) = tls.psk_skip_session_ticket {
+        tls_builder = tls_builder.psk_skip_session_ticket(b);
+    }
+    if let Some(v) = tls.record_size_limit {
+        tls_builder = tls_builder.record_size_limit(v);
+    }
+    if let Some(v) = tls.key_shares_limit {
+        tls_builder = tls_builder.key_shares_limit(v);
+    }
+
+    if !tls.alps_protocols.is_empty() {
+        let alps: Vec<AlpsProtocol> = tls
+            .alps_protocols
+            .iter()
+            .map(|s| alps_from_str(s))
+            .collect::<Result<_, _>>()?;
+        tls_builder = tls_builder.alps_protocols(alps);
+    }
+    if let Some(b) = tls.alps_use_new_codepoint {
+        tls_builder = tls_builder.alps_use_new_codepoint(b);
+    }
+
+    if !tls.cert_compression.is_empty() {
+        let algs: Vec<CertificateCompressionAlgorithm> = tls
+            .cert_compression
+            .iter()
+            .map(|s| cert_compression_from_str(s))
+            .collect::<Result<_, _>>()?;
+        tls_builder = tls_builder.certificate_compression_algorithms(algs);
+    }
+
+    if !tls.delegated_credentials.is_empty() {
+        tls_builder = tls_builder.delegated_credentials(tls.delegated_credentials.join(":"));
+    }
+
+    if !tls.extension_permutation.is_empty() {
+        if tls.permute_extensions == Some(true) {
+            tracing::warn!(
+                profile = %spec.name,
+                "custom profile: both permute_extensions and extension_permutation set; \
+                 permute_extensions wins, extension_permutation ignored"
+            );
+        } else {
+            let exts: Vec<ExtensionType> = tls
+                .extension_permutation
+                .iter()
+                .map(|s| extension_from_str(s))
+                .collect::<Result<_, _>>()?;
+            tls_builder = tls_builder.extension_permutation(exts);
+        }
+    }
+
     let tls_options = tls_builder.build();
 
-    // HTTP/2 settings order: typed builder.
+    // ----- HTTP/2 -----
     let mut settings_builder = SettingsOrder::builder();
-    for s in &spec.http2.settings_order {
-        let id = setting_from_str(s)?;
-        settings_builder = settings_builder.push(id);
+    for s in &http2.settings_order {
+        settings_builder = settings_builder.push(setting_from_str(s)?);
     }
     let settings_order = settings_builder.build();
 
-    // HTTP/2 pseudo-header order: wreq only orders the pseudo-header block,
-    // so non-pseudo entries (e.g. `"user-agent"`) cannot participate. We
-    // warn-and-drop those per entry so operators copying header orders from
-    // packet captures see what was discarded. If a TOML lists ONLY non-pseudo
-    // entries we still error so the user gets a hard signal.
     let mut pseudo_builder = PseudoOrder::builder();
     let mut saw_pseudo = false;
-    for entry in &spec.http2.header_order {
+    for entry in &http2.header_order {
         if let Some(id) = pseudo_from_str(entry)? {
             pseudo_builder = pseudo_builder.push(id);
             saw_pseudo = true;
@@ -248,7 +350,7 @@ fn build_emulation(spec: &CustomProfileSpec) -> Result<wreq::Emulation, anyhow::
             tracing::warn!(
                 profile = %spec.name,
                 entry = %entry,
-                "custom profile: dropping non-pseudo header_order entry (wreq only supports pseudo-header ordering)",
+                "custom profile: dropping non-pseudo header_order entry",
             );
         }
     }
@@ -260,20 +362,89 @@ fn build_emulation(spec: &CustomProfileSpec) -> Result<wreq::Emulation, anyhow::
     }
     let pseudo_order = pseudo_builder.build();
 
-    let http2_options = Http2Options::builder()
-        .header_table_size(spec.http2.header_table_size)
-        .enable_push(spec.http2.enable_push)
-        .initial_window_size(spec.http2.initial_window_size)
-        .max_frame_size(spec.http2.max_frame_size)
-        .max_header_list_size(spec.http2.max_header_list_size)
+    let mut h2_builder = Http2Options::builder()
         .settings_order(settings_order)
-        .headers_pseudo_order(pseudo_order)
-        .build();
+        .headers_pseudo_order(pseudo_order);
+    if let Some(v) = http2.header_table_size {
+        h2_builder = h2_builder.header_table_size(v);
+    }
+    if let Some(b) = http2.enable_push {
+        h2_builder = h2_builder.enable_push(b);
+    }
+    if let Some(v) = http2.max_concurrent_streams {
+        h2_builder = h2_builder.max_concurrent_streams(v);
+    }
+    if let Some(v) = http2.initial_window_size {
+        h2_builder = h2_builder.initial_window_size(v);
+    }
+    if let Some(v) = http2.initial_connection_window_size {
+        h2_builder = h2_builder.initial_connection_window_size(v);
+    }
+    if let Some(v) = http2.max_frame_size {
+        h2_builder = h2_builder.max_frame_size(v);
+    }
+    if let Some(v) = http2.max_header_list_size {
+        h2_builder = h2_builder.max_header_list_size(v);
+    }
+    if let Some(b) = http2.enable_connect_protocol {
+        h2_builder = h2_builder.enable_connect_protocol(b);
+    }
+    if let Some(b) = http2.no_rfc7540_priorities {
+        h2_builder = h2_builder.no_rfc7540_priorities(b);
+    }
+    if let Some(dep) = &http2.headers_stream_dependency {
+        h2_builder = h2_builder.headers_stream_dependency(StreamDependency::new(
+            StreamId::from(dep.stream_id),
+            dep.weight,
+            dep.exclusive,
+        ));
+    }
+    let http2_options = h2_builder.build();
 
     Ok(wreq::Emulation::builder()
         .tls_options(tls_options)
         .http2_options(http2_options)
         .build())
+}
+
+fn alpn_from_str(s: &str) -> Result<AlpnProtocol, anyhow::Error> {
+    match s {
+        "h2" => Ok(AlpnProtocol::HTTP2),
+        "http/1.1" => Ok(AlpnProtocol::HTTP1),
+        "h3" => Ok(AlpnProtocol::HTTP3),
+        other => Err(anyhow::anyhow!("unknown alpn protocol: {other}")),
+    }
+}
+
+fn alps_from_str(s: &str) -> Result<AlpsProtocol, anyhow::Error> {
+    match s {
+        "h2" => Ok(AlpsProtocol::HTTP2),
+        "http/1.1" => Ok(AlpsProtocol::HTTP1),
+        "h3" => Ok(AlpsProtocol::HTTP3),
+        other => Err(anyhow::anyhow!("unknown alps protocol: {other}")),
+    }
+}
+
+fn cert_compression_from_str(s: &str) -> Result<CertificateCompressionAlgorithm, anyhow::Error> {
+    match s {
+        "zlib" => Ok(CertificateCompressionAlgorithm::ZLIB),
+        "brotli" => Ok(CertificateCompressionAlgorithm::BROTLI),
+        "zstd" => Ok(CertificateCompressionAlgorithm::ZSTD),
+        other => Err(anyhow::anyhow!(
+            "unknown cert compression algorithm: {other}"
+        )),
+    }
+}
+
+/// Resolve the (min, max) TLS version bounds wreq accepts from the ordered
+/// `supported_versions` list. Order is informational; wreq has no ordered knob.
+fn version_bounds(versions: &[TlsVersion]) -> (Option<TlsVersion>, Option<TlsVersion>) {
+    if versions.is_empty() {
+        return (None, None);
+    }
+    let mut sorted = versions.to_vec();
+    sorted.sort_by_key(|v| tls_version_rank(*v));
+    (sorted.first().copied(), sorted.last().copied())
 }
 
 /// Translate a string identifier to a `wreq::tls::ExtensionType`.
@@ -384,15 +555,14 @@ name = "chrome-148"
 [tls]
 alpn = ["h2", "http/1.1"]
 cipher_suites = ["TLS_AES_128_GCM_SHA256"]
-extensions = ["server_name", "supported_groups"]
-supported_versions = ["TLS1.3", "TLS1.2"]
 signature_algorithms = ["ecdsa_secp256r1_sha256"]
+supported_versions = ["TLS1.3", "TLS1.2"]
+supported_groups = ["X25519", "P-256"]
 
 [http2]
 header_table_size = 65536
 enable_push = false
 initial_window_size = 6291456
-max_frame_size = 16384
 max_header_list_size = 262144
 settings_order = ["HEADER_TABLE_SIZE", "ENABLE_PUSH"]
 header_order = [":method", ":authority", ":scheme", ":path"]
@@ -408,18 +578,17 @@ header_order = [":method", ":authority", ":scheme", ":path"]
         );
         assert_eq!(spec.tls.cipher_suites, vec!["TLS_AES_128_GCM_SHA256"]);
         assert_eq!(
-            spec.tls.extensions,
-            vec!["server_name".to_string(), "supported_groups".to_string()]
+            spec.tls.supported_groups,
+            vec!["X25519".to_string(), "P-256".to_string()]
         );
         assert_eq!(
             spec.tls.supported_versions,
             vec!["TLS1.3".to_string(), "TLS1.2".to_string()]
         );
-        assert_eq!(spec.http2.header_table_size, 65536);
-        assert!(!spec.http2.enable_push);
-        assert_eq!(spec.http2.initial_window_size, 6291456);
-        assert_eq!(spec.http2.max_frame_size, 16384);
-        assert_eq!(spec.http2.max_header_list_size, 262144);
+        assert_eq!(spec.http2.header_table_size, Some(65536));
+        assert_eq!(spec.http2.enable_push, Some(false));
+        assert_eq!(spec.http2.initial_window_size, Some(6291456));
+        assert_eq!(spec.http2.max_header_list_size, Some(262144));
         assert_eq!(
             spec.http2.settings_order,
             vec!["HEADER_TABLE_SIZE".to_string(), "ENABLE_PUSH".to_string()]
@@ -476,6 +645,24 @@ header_order = [":method", ":authority", ":scheme", ":path"]
                 assert!(msg.contains("unknown alpn"), "got: {msg}");
             }
             other => panic!("expected CustomLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_legacy_extensions_field() {
+        let legacy = MINIMAL_TOML.replace(
+            "supported_groups = [\"X25519\", \"P-256\"]",
+            "supported_groups = [\"X25519\"]\nextensions = [\"server_name\"]",
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.toml");
+        std::fs::write(&path, legacy).unwrap();
+        match CustomProfile::load(&path) {
+            Err(ImpersonateError::CustomLoad { source, .. }) => {
+                let msg = format!("{source}");
+                assert!(msg.contains("parse"), "got: {msg}");
+            }
+            other => panic!("expected CustomLoad parse error, got {other:?}"),
         }
     }
 
