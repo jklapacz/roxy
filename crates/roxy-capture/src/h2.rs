@@ -20,11 +20,15 @@ use httlib_hpack::Decoder;
 /// `Http2Spec`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapturedHttp2 {
-    pub header_table_size: u32,
-    pub enable_push: bool,
-    pub initial_window_size: u32,
-    pub max_frame_size: u32,
-    pub max_header_list_size: u32,
+    pub header_table_size: Option<u32>,
+    pub enable_push: Option<bool>,
+    pub max_concurrent_streams: Option<u32>,
+    pub initial_window_size: Option<u32>,
+    pub initial_connection_window_size: Option<u32>,
+    pub max_frame_size: Option<u32>,
+    pub max_header_list_size: Option<u32>,
+    pub enable_connect_protocol: Option<bool>,
+    pub no_rfc7540_priorities: Option<bool>,
     pub settings_order: Vec<String>,
     pub header_order: Vec<String>,
 }
@@ -33,6 +37,7 @@ const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 const FRAME_HEADER_LEN: usize = 9;
 const FRAME_SETTINGS: u8 = 0x4;
 const FRAME_HEADERS: u8 = 0x1;
+const FRAME_WINDOW_UPDATE: u8 = 0x8;
 const FLAG_ACK: u8 = 0x1;
 const FLAG_PADDED: u8 = 0x8;
 const FLAG_PRIORITY: u8 = 0x20;
@@ -44,14 +49,16 @@ const FLAG_PRIORITY: u8 = 0x20;
 pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
     let mut cursor = buf.strip_prefix(PREFACE)?;
 
-    // RFC 9113 SETTINGS defaults; overridden by whatever the client sends.
-    let mut header_table_size: u32 = 4096;
-    let mut enable_push: bool = true;
-    let mut initial_window_size: u32 = 65535;
-    let mut max_frame_size: u32 = 16384;
-    // No protocol default for MAX_HEADER_LIST_SIZE ("unlimited"); use a sane
-    // finite fallback so the emitted profile is loadable.
-    let mut max_header_list_size: u32 = 262144;
+    // Only what the client actually sent is captured; everything starts unset.
+    let mut header_table_size: Option<u32> = None;
+    let mut enable_push: Option<bool> = None;
+    let mut max_concurrent_streams: Option<u32> = None;
+    let mut initial_window_size: Option<u32> = None;
+    let mut initial_connection_window_size: Option<u32> = None;
+    let mut max_frame_size: Option<u32> = None;
+    let mut max_header_list_size: Option<u32> = None;
+    let mut enable_connect_protocol: Option<bool> = None;
+    let mut no_rfc7540_priorities: Option<bool> = None;
     let mut settings_order: Vec<String> = Vec::new();
     let mut got_settings = false;
     let mut header_order: Option<Vec<String>> = None;
@@ -75,11 +82,14 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
                         settings_order.push(name.to_string());
                     }
                     match id {
-                        0x1 => header_table_size = value,
-                        0x2 => enable_push = value != 0,
-                        0x4 => initial_window_size = value,
-                        0x5 => max_frame_size = value,
-                        0x6 => max_header_list_size = value,
+                        0x1 => header_table_size = Some(value),
+                        0x2 => enable_push = Some(value != 0),
+                        0x3 => max_concurrent_streams = Some(value),
+                        0x4 => initial_window_size = Some(value),
+                        0x5 => max_frame_size = Some(value),
+                        0x6 => max_header_list_size = Some(value),
+                        0x8 => enable_connect_protocol = Some(value != 0),
+                        0x9 => no_rfc7540_priorities = Some(value != 0),
                         _ => {}
                     }
                 }
@@ -87,6 +97,15 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
             }
             FRAME_HEADERS if header_order.is_none() => {
                 header_order = Some(decode_pseudo_order(body, flags));
+            }
+            FRAME_WINDOW_UPDATE if initial_connection_window_size.is_none() => {
+                let stream_id =
+                    u32::from_be_bytes([cursor[5] & 0x7f, cursor[6], cursor[7], cursor[8]]);
+                if stream_id == 0 && body.len() >= 4 {
+                    let inc =
+                        u32::from_be_bytes([body[0], body[1], body[2], body[3]]) & 0x7fff_ffff;
+                    initial_connection_window_size = Some(inc);
+                }
             }
             _ => {}
         }
@@ -101,9 +120,13 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
     Some(CapturedHttp2 {
         header_table_size,
         enable_push,
+        max_concurrent_streams,
         initial_window_size,
+        initial_connection_window_size,
         max_frame_size,
         max_header_list_size,
+        enable_connect_protocol,
+        no_rfc7540_priorities,
         settings_order,
         header_order,
     })
@@ -226,22 +249,20 @@ mod tests {
         ));
         buf.extend_from_slice(&frame(
             FRAME_HEADERS,
-            0x4, // END_HEADERS
+            0x4,
             &hpack_block(&[
                 (":method", "GET"),
                 (":authority", "example.com"),
                 (":scheme", "https"),
                 (":path", "/"),
-                ("user-agent", "test"),
             ]),
         ));
-
         let h2 = parse_http2(&buf).expect("should parse");
-        assert_eq!(h2.header_table_size, 65536);
-        assert!(!h2.enable_push);
-        assert_eq!(h2.initial_window_size, 6291456);
-        assert_eq!(h2.max_header_list_size, 262144);
-        assert_eq!(h2.max_frame_size, 16384); // default, not sent
+        assert_eq!(h2.header_table_size, Some(65536));
+        assert_eq!(h2.enable_push, Some(false));
+        assert_eq!(h2.initial_window_size, Some(6291456));
+        assert_eq!(h2.max_header_list_size, Some(262144));
+        assert_eq!(h2.max_frame_size, None); // not sent — must not be emitted
         assert_eq!(
             h2.settings_order,
             vec![
@@ -255,6 +276,24 @@ mod tests {
             h2.header_order,
             vec![":method", ":authority", ":scheme", ":path"]
         );
+    }
+
+    #[test]
+    fn captures_connection_window_update() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(PREFACE);
+        buf.extend_from_slice(&frame(FRAME_SETTINGS, 0, &settings_body(&[(0x2, 0)])));
+        // WINDOW_UPDATE frame, stream 0, increment 15663105 (0x00EF0001).
+        let mut wu = vec![0, 0, 4, 0x8, 0, 0, 0, 0, 0];
+        wu.extend_from_slice(&15663105u32.to_be_bytes());
+        buf.extend_from_slice(&wu);
+        buf.extend_from_slice(&frame(
+            FRAME_HEADERS,
+            0x4,
+            &hpack_block(&[(":method", "GET")]),
+        ));
+        let h2 = parse_http2(&buf).expect("should parse");
+        assert_eq!(h2.initial_connection_window_size, Some(15663105));
     }
 
     #[test]

@@ -141,17 +141,33 @@ pub fn render(
     out.push_str("[http2]\n");
     match http2 {
         Some(h) => {
-            out.push_str(&format!("header_table_size = {}\n", h.header_table_size));
-            out.push_str(&format!("enable_push = {}\n", h.enable_push));
-            out.push_str(&format!(
-                "initial_window_size = {}\n",
-                h.initial_window_size
-            ));
-            out.push_str(&format!("max_frame_size = {}\n", h.max_frame_size));
-            out.push_str(&format!(
-                "max_header_list_size = {}\n",
-                h.max_header_list_size
-            ));
+            if let Some(v) = h.header_table_size {
+                out.push_str(&format!("header_table_size = {v}\n"));
+            }
+            if let Some(v) = h.enable_push {
+                out.push_str(&format!("enable_push = {v}\n"));
+            }
+            if let Some(v) = h.max_concurrent_streams {
+                out.push_str(&format!("max_concurrent_streams = {v}\n"));
+            }
+            if let Some(v) = h.initial_window_size {
+                out.push_str(&format!("initial_window_size = {v}\n"));
+            }
+            if let Some(v) = h.initial_connection_window_size {
+                out.push_str(&format!("initial_connection_window_size = {v}\n"));
+            }
+            if let Some(v) = h.max_frame_size {
+                out.push_str(&format!("max_frame_size = {v}\n"));
+            }
+            if let Some(v) = h.max_header_list_size {
+                out.push_str(&format!("max_header_list_size = {v}\n"));
+            }
+            if let Some(v) = h.enable_connect_protocol {
+                out.push_str(&format!("enable_connect_protocol = {v}\n"));
+            }
+            if let Some(v) = h.no_rfc7540_priorities {
+                out.push_str(&format!("no_rfc7540_priorities = {v}\n"));
+            }
             out.push_str(&format!(
                 "settings_order = {}\n",
                 string_array(&h.settings_order)
@@ -240,11 +256,15 @@ mod tests {
 
     fn sample_http2() -> CapturedHttp2 {
         CapturedHttp2 {
-            header_table_size: 65536,
-            enable_push: false,
-            initial_window_size: 6291456,
-            max_frame_size: 16384,
-            max_header_list_size: 262144,
+            header_table_size: Some(65536),
+            enable_push: Some(false),
+            max_concurrent_streams: None,
+            initial_window_size: Some(6291456),
+            initial_connection_window_size: None,
+            max_frame_size: None,
+            max_header_list_size: Some(262144),
+            enable_connect_protocol: None,
+            no_rfc7540_priorities: None,
             settings_order: vec!["HEADER_TABLE_SIZE".into(), "ENABLE_PUSH".into()],
             header_order: vec![":method".into(), ":authority".into()],
         }
