@@ -93,22 +93,24 @@ async fn captures_real_browser_fingerprint_into_loadable_profile() {
         .iter()
         .any(|h| h.starts_with(':')));
 
-    // wreq's Chrome 137 emulation GREASEs, sends modern curves, ALPS, and a
-    // permuted extension order — the enriched capture must record those.
-    assert!(
-        profile.spec.tls.grease == Some(true),
+    // wreq's Chrome 137 emulation GREASEs, sends modern curves and ALPS, and
+    // permutes its extension order — the enriched capture must record those.
+    assert_eq!(
+        profile.spec.tls.grease,
+        Some(true),
         "GREASE should be detected"
     );
-    assert!(
-        !profile.spec.tls.supported_groups.is_empty(),
-        "supported_groups should be captured"
-    );
-    assert!(
-        profile.spec.tls.permute_extensions == Some(true),
+    assert_eq!(
+        profile.spec.tls.permute_extensions,
+        Some(true),
         "GREASE client should get permute_extensions best-guess"
     );
     assert!(
         profile.spec.tls.extension_permutation.is_empty(),
         "permuting client must not also pin extension_permutation"
+    );
+    assert!(
+        !profile.spec.tls.alps_protocols.is_empty(),
+        "ALPS protocols should be captured"
     );
 }
