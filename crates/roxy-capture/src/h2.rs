@@ -19,8 +19,11 @@ use httlib_hpack::Decoder;
 /// Stream dependency extracted from a HEADERS frame PRIORITY prefix.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapturedStreamDependency {
+    /// Dependency stream id (browsers use 0).
     pub stream_id: u32,
+    /// Raw wire weight byte (0-255).
     pub weight: u8,
+    /// Exclusive-dependency flag.
     pub exclusive: bool,
 }
 
@@ -28,17 +31,29 @@ pub struct CapturedStreamDependency {
 /// `Http2Spec`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapturedHttp2 {
+    /// SETTINGS HEADER_TABLE_SIZE (0x1), if the client sent it.
     pub header_table_size: Option<u32>,
+    /// SETTINGS ENABLE_PUSH (0x2), if the client sent it.
     pub enable_push: Option<bool>,
+    /// SETTINGS MAX_CONCURRENT_STREAMS (0x3), if the client sent it.
     pub max_concurrent_streams: Option<u32>,
+    /// SETTINGS INITIAL_WINDOW_SIZE (0x4), if the client sent it.
     pub initial_window_size: Option<u32>,
+    /// Connection-level WINDOW_UPDATE increment (stream 0).
     pub initial_connection_window_size: Option<u32>,
+    /// SETTINGS MAX_FRAME_SIZE (0x5), if the client sent it.
     pub max_frame_size: Option<u32>,
+    /// SETTINGS MAX_HEADER_LIST_SIZE (0x6), if the client sent it.
     pub max_header_list_size: Option<u32>,
+    /// SETTINGS ENABLE_CONNECT_PROTOCOL (0x8), if the client sent it.
     pub enable_connect_protocol: Option<bool>,
+    /// SETTINGS NO_RFC7540_PRIORITIES (0x9), if the client sent it.
     pub no_rfc7540_priorities: Option<bool>,
+    /// SETTINGS ids in the order the client sent them.
     pub settings_order: Vec<String>,
+    /// Pseudo-header names (`:method`, `:authority`, etc.) from the first HEADERS frame, in wire order.
     pub header_order: Vec<String>,
+    /// Priority info from the first HEADERS frame, if the PRIORITY flag was set.
     pub headers_stream_dependency: Option<CapturedStreamDependency>,
 }
 
@@ -110,6 +125,7 @@ pub fn parse_http2(buf: &[u8]) -> Option<CapturedHttp2> {
                 header_order = Some(order);
                 headers_stream_dependency = dep;
             }
+            // Intentionally capture only the first connection-level WINDOW_UPDATE: that is the preface increment browsers send.
             FRAME_WINDOW_UPDATE if initial_connection_window_size.is_none() => {
                 let stream_id =
                     u32::from_be_bytes([cursor[5] & 0x7f, cursor[6], cursor[7], cursor[8]]);

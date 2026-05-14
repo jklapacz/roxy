@@ -460,6 +460,45 @@ mod tests {
     }
 
     #[test]
+    fn non_grease_extension_permutation_round_trips() {
+        let name = ProfileName::parse("captured-fixed-exts").unwrap();
+        let mut tls = sample_tls();
+        tls.grease = false;
+        // Exercise the trickier extension identifiers that must round-trip
+        // through extension_name -> extension_permutation -> extension_from_str.
+        tls.extensions = vec![
+            "server_name".into(),
+            "application_settings_new".into(),
+            "certificate_timestamp".into(),
+            "renegotiation_info".into(),
+            "cert_compression".into(),
+            "supported_groups".into(),
+        ];
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        assert!(
+            toml.contains("extension_permutation = "),
+            "non-GREASE capture must emit extension_permutation:\n{toml}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captured-fixed-exts.toml");
+        std::fs::write(&path, &toml).unwrap();
+        let profile = roxy_impersonate::CustomProfile::load(&path)
+            .expect("non-GREASE profile with real extension names must load");
+        assert_eq!(
+            profile.spec.tls.extension_permutation,
+            vec![
+                "server_name",
+                "application_settings_new",
+                "certificate_timestamp",
+                "renegotiation_info",
+                "cert_compression",
+                "supported_groups",
+            ]
+        );
+    }
+
+    #[test]
     fn headers_stream_dependency_round_trips() {
         let name = ProfileName::parse("captured-dep").unwrap();
         let mut http2 = sample_http2();

@@ -79,6 +79,8 @@ pub struct TlsSpec {
     pub session_ticket: Option<bool>,
     pub renegotiation: Option<bool>,
     pub pre_shared_key: Option<bool>,
+    // The following fields are intentionally hand-authored-only; roxy-capture does not
+    // auto-detect them because they are not observable from a single TLS capture.
     pub psk_dhe_ke: Option<bool>,
     pub psk_skip_session_ticket: Option<bool>,
     pub preserve_tls13_cipher_list: Option<bool>,
@@ -86,8 +88,10 @@ pub struct TlsSpec {
     pub alps_protocols: Vec<String>,
     pub alps_use_new_codepoint: Option<bool>,
     pub cert_compression: Vec<String>,
+    /// Hand-authored-only: roxy-capture does not auto-detect delegated credentials.
     pub delegated_credentials: Vec<String>,
     pub record_size_limit: Option<u16>,
+    /// Hand-authored-only: roxy-capture does not auto-detect the key-shares limit.
     pub key_shares_limit: Option<u8>,
     /// Fixed extension order for non-permuting clients (Safari/okhttp). Mutually
     /// exclusive with `permute_extensions`.
@@ -474,6 +478,7 @@ fn extension_from_str(s: &str) -> Result<ExtensionType, anyhow::Error> {
         "certificate_authorities" => ExtensionType::CERTIFICATE_AUTHORITIES,
         "signature_algorithms_cert" => ExtensionType::SIGNATURE_ALGORITHMS_CERT,
         "key_share" => ExtensionType::KEY_SHARE,
+        // `renegotiate` is a legacy alias for hand-written profiles; roxy-capture only emits `renegotiation_info`.
         "renegotiate" => ExtensionType::RENEGOTIATE,
         "renegotiation_info" => ExtensionType::RENEGOTIATE,
         "delegated_credential" => ExtensionType::DELEGATED_CREDENTIAL,
