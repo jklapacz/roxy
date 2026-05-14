@@ -18,6 +18,9 @@ pub type BoxBody = http_body_util::combinators::UnsyncBoxBody<Bytes, std::io::Er
 #[derive(Clone)]
 pub struct Handler<C: Cache + 'static> {
     pub cache: Arc<C>,
+    /// When false, skip cache lookup (serve) and store (write) entirely — every
+    /// request is MITM'd and proxied as normal, just never cached.
+    pub cache_enabled: bool,
     pub default_ttl: Duration,
     pub router: Arc<UpstreamRouter>,
     pub default_profile: Option<String>,
@@ -92,10 +95,13 @@ impl<C: Cache + 'static> Handler<C> {
         scheme: &str,
         mut req: Request<hyper::body::Incoming>,
     ) -> Result<Response<BoxBody>, Infallible> {
-        // 3. Cache key.
+        // 3. Cache key. Built unconditionally — the host-mismatch warning it
+        //    emits is part of the core flow even when caching is disabled.
         let key = build_cache_key_and_warn(&req, &label, scheme, &authority);
-        if let Ok(Some(hit)) = self.cache.lookup(&key).await {
-            return Ok(reply_from_cache(hit));
+        if self.cache_enabled {
+            if let Ok(Some(hit)) = self.cache.lookup(&key).await {
+                return Ok(reply_from_cache(hit));
+            }
         }
 
         // 4. Rebuild upstream URI (authority is supplied by the caller, path comes from the request).
@@ -134,8 +140,10 @@ impl<C: Cache + 'static> Handler<C> {
         let cache_eligible = status.is_success() || status.is_redirection();
         let (resp_parts, resp_body) = resp.into_parts();
 
-        // Build writer only when caching this response.
-        let writer: Option<Box<dyn CacheWriter>> = if cache_eligible {
+        // Build writer only when caching is enabled and this response is
+        // eligible. With caching disabled, `writer` stays None and `tee_pump`
+        // streams straight through to the client.
+        let writer: Option<Box<dyn CacheWriter>> = if self.cache_enabled && cache_eligible {
             let meta = roxy_cache::ResponseMeta {
                 status: status.as_u16(),
                 headers: header_pairs(&resp_parts.headers),

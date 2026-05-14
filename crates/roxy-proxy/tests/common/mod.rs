@@ -53,6 +53,9 @@ pub struct Fixture {
     pub roxy_ca_pem: String,
     pub origin_ca: Arc<TestCa>,
     pub hits: HitCounter,
+    /// roxy's cache directory. With caching disabled it must stay free of
+    /// cache entries — see `cache_dir_is_empty`.
+    pub cache_dir: PathBuf,
     _origin_handle: JoinHandle<()>,
     _roxy_handle: JoinHandle<anyhow::Result<()>>,
     _tmp: TempDir,
@@ -79,6 +82,33 @@ impl Fixture {
     pub fn upstream_hit_count(&self, key: &str) -> usize {
         self.hits.count(key)
     }
+
+    /// True when roxy's cache directory holds no cache entries. `FsCache::open`
+    /// always creates the `index.sqlite` index (plus its `-wal`/`-shm`
+    /// sidecars), so those structural files are ignored — any *other* file (a
+    /// stored blob, a tmp write) means a cache operation actually occurred.
+    pub fn cache_dir_is_empty(&self) -> bool {
+        fn entry_files(dir: &std::path::Path) -> usize {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return 0;
+            };
+            let mut n = 0;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    n += entry_files(&path);
+                } else if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("index.sqlite")
+                {
+                    n += 1;
+                }
+            }
+            n
+        }
+        entry_files(&self.cache_dir) == 0
+    }
 }
 
 /// Encode a path so it can be used as a query parameter. Tests use this only
@@ -103,6 +133,7 @@ pub struct FixtureBuilder {
     default_profile: Option<String>,
     profiles_dir: Option<PathBuf>,
     inject_origin_ca_into_wreq: bool,
+    cache_enabled: bool,
 }
 
 impl FixtureBuilder {
@@ -112,11 +143,19 @@ impl FixtureBuilder {
             default_profile: None,
             profiles_dir: None,
             inject_origin_ca_into_wreq: false,
+            cache_enabled: true,
         }
     }
 
     pub fn default_ttl_seconds(mut self, v: u64) -> Self {
         self.default_ttl_seconds = v;
+        self
+    }
+
+    /// Set `[cache] enabled`. When false, roxy still MITMs and proxies every
+    /// request but never serves from or writes to the cache.
+    pub fn cache_enabled(mut self, v: bool) -> Self {
+        self.cache_enabled = v;
         self
     }
 
@@ -302,10 +341,12 @@ async fn spawn_fixture_with(b: FixtureBuilder) -> Fixture {
     let roxy_addr: SocketAddr = roxy_listener.local_addr().unwrap();
     drop(roxy_listener); // free port; race-ish but fine for tests
     let cfg_path = tmp.path().join("roxy.toml");
+    let cache_dir = tmp.path().join("cache");
     let mut cfg_text = format!(
         r#"
 listen = "{roxy_addr}"
 [cache]
+enabled = {}
 dir = "{}"
 default_ttl_seconds = {}
 [ca]
@@ -313,7 +354,8 @@ dir = "{}"
 [log]
 level = "warn"
 "#,
-        tmp.path().join("cache").display(),
+        b.cache_enabled,
+        cache_dir.display(),
         b.default_ttl_seconds,
         tmp.path().join("ca").display(),
     );
@@ -351,6 +393,7 @@ level = "warn"
         roxy_ca_pem,
         origin_ca,
         hits,
+        cache_dir,
         _origin_handle: origin_handle,
         _roxy_handle: roxy_handle,
         _tmp: tmp,

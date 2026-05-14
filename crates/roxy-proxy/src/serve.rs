@@ -68,6 +68,7 @@ pub async fn run(
     let handler = ProxyConnHandler {
         inner: Arc::new(Handler {
             cache: cache.clone(),
+            cache_enabled: cfg.cache.enabled,
             default_ttl: Duration::from_secs(cfg.cache.default_ttl_seconds),
             router,
             default_profile: cfg.impersonate.default_profile.clone(),

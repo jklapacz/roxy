@@ -21,6 +21,10 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct CacheConfig {
+    /// When false, roxy never serves from or writes to the cache — it still
+    /// MITMs and proxies every request. Useful for testing fingerprint/MITM
+    /// behavior in isolation. Default true.
+    pub enabled: bool,
     pub dir: PathBuf,
     pub default_ttl_seconds: u64,
 }
@@ -102,6 +106,7 @@ impl Default for Config {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             dir: PathBuf::from("~/.local/share/roxy/cache"),
             default_ttl_seconds: 3600,
         }
@@ -204,6 +209,20 @@ mod tests {
         assert_eq!(c.impersonate.default_profile, None);
         assert_eq!(c.impersonate.profiles_dir, PathBuf::from("./profiles"));
         assert!(c.impersonate.strip_header);
+    }
+
+    #[test]
+    fn cache_enabled_defaults_true() {
+        assert!(Config::default().cache.enabled);
+    }
+
+    #[test]
+    fn cache_enabled_parses_false_from_toml() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"[cache]"#).unwrap();
+        writeln!(f, r#"enabled = false"#).unwrap();
+        let c = load_from_path(f.path()).unwrap();
+        assert!(!c.cache.enabled);
     }
 
     #[test]
