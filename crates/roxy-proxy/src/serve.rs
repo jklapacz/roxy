@@ -156,7 +156,7 @@ impl<C: Cache + 'static> ConnHandler for ProxyConnHandler<C> {
         roxy_http::serve_tls(tls, move |req| {
             let inner = inner.clone();
             let authority = authority_clone.clone();
-            async move { inner.handle(authority, req).await }
+            async move { inner.handle_tunneled(authority, req).await }
         })
         .await;
     }

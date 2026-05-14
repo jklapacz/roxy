@@ -28,7 +28,7 @@ pub struct Handler<C: Cache + 'static> {
 pub const FINGERPRINT_HEADER: &str = "x-roxy-fingerprint";
 
 impl<C: Cache + 'static> Handler<C> {
-    pub async fn handle(
+    pub async fn handle_tunneled(
         &self,
         authority: String,
         mut req: Request<hyper::body::Incoming>,
@@ -50,19 +50,28 @@ impl<C: Cache + 'static> Handler<C> {
             }
         };
 
-        // 2. Strip header before forwarding upstream.
+        // 2. Strip header before forwarding upstream (config-gated).
         if self.strip_fingerprint_header {
             req.headers_mut().remove(FINGERPRINT_HEADER);
         }
 
-        // 3. Cache key includes the label.
-        let key = build_cache_key_and_warn(&req, &label, &authority);
+        self.handle_inner(label, authority, "https", req).await
+    }
+
+    async fn handle_inner(
+        &self,
+        label: String,
+        authority: String,
+        scheme: &str,
+        mut req: Request<hyper::body::Incoming>,
+    ) -> Result<Response<BoxBody>, Infallible> {
+        // 3. Cache key.
+        let key = build_cache_key_and_warn(&req, &label, scheme, &authority);
         if let Ok(Some(hit)) = self.cache.lookup(&key).await {
             return Ok(reply_from_cache(hit));
         }
 
         // 4. Rebuild upstream URI (authority is from CONNECT, path comes from inner request).
-        let scheme = req.uri().scheme_str().unwrap_or("https");
         let path_and_query = req
             .uri()
             .path_and_query()
@@ -290,12 +299,17 @@ fn authority_matches(connect: &str, client: &str) -> bool {
     normalize(connect) == normalize(client)
 }
 
-fn build_cache_key_and_warn<B>(req: &Request<B>, label: &str, authority: &str) -> CacheKey {
+fn build_cache_key_and_warn<B>(
+    req: &Request<B>,
+    label: &str,
+    scheme: &str,
+    authority: &str,
+) -> CacheKey {
     let host_for_key = authority.to_ascii_lowercase();
     let key = CacheKey::from_parts(
         label,
         req.method().as_str(),
-        "https",
+        scheme,
         &host_for_key,
         req.uri().path(),
         req.uri().query(),
@@ -324,7 +338,7 @@ fn upstream_kind(e: &UpstreamError) -> &'static str {
         UpstreamError::Client(_) => "rustls_client",
         UpstreamError::Uri(_) => "uri",
         UpstreamError::UnknownFingerprint(_) => {
-            unreachable!("handled directly in Handler::handle")
+            unreachable!("handled directly in Handler::handle_inner")
         }
     }
 }
@@ -459,7 +473,7 @@ mod key_tests {
             .header(http::header::HOST, "attacker.com")
             .body(())
             .unwrap();
-        let key = build_cache_key_and_warn(&req, "p", "bank.com:443");
+        let key = build_cache_key_and_warn(&req, "p", "https", "bank.com:443");
         let expected = CacheKey::from_parts("p", "GET", "https", "bank.com:443", "/api", None);
         assert_eq!(key, expected);
     }
@@ -471,7 +485,7 @@ mod key_tests {
             .body(())
             .unwrap();
         let output = captured_warnings(|| {
-            let _ = build_cache_key_and_warn(&req, "p", "bank.com:443");
+            let _ = build_cache_key_and_warn(&req, "p", "https", "bank.com:443");
         });
         assert!(
             output.contains("kind=\"host_mismatch\""),
@@ -494,7 +508,7 @@ mod key_tests {
             .body(())
             .unwrap();
         let output = captured_warnings(|| {
-            let _ = build_cache_key_and_warn(&req, "p", "bank.com:443");
+            let _ = build_cache_key_and_warn(&req, "p", "https", "bank.com:443");
         });
         assert!(
             !output.contains("host_mismatch"),
@@ -506,11 +520,22 @@ mod key_tests {
     fn absolute_form_uri_matching_connect_authority_does_not_warn() {
         let req = Request::get("https://bank.com/api").body(()).unwrap();
         let output = captured_warnings(|| {
-            let _ = build_cache_key_and_warn(&req, "p", "bank.com:443");
+            let _ = build_cache_key_and_warn(&req, "p", "https", "bank.com:443");
         });
         assert!(
             !output.contains("host_mismatch"),
             "expected no warning when absolute-form URI matches CONNECT authority (after default-port strip), got: {output}"
+        );
+    }
+
+    #[test]
+    fn cache_key_uses_http_scheme_differs_from_https() {
+        let req = Request::get("http://bank.com/api").body(()).unwrap();
+        let http_key = build_cache_key_and_warn(&req, "p", "http", "bank.com:443");
+        let https_key = build_cache_key_and_warn(&req, "p", "https", "bank.com:443");
+        assert_ne!(
+            http_key, https_key,
+            "scheme must participate in the cache key"
         );
     }
 }
