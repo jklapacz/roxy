@@ -2,9 +2,10 @@
 #![allow(clippy::expect_used)]
 
 //! Ring 3 fidelity gate: a known-good chrome-148 profile, replayed through
-//! roxy, must reproduce real Chrome 148's JA4_r and peetprint — except for the
-//! one documented hard limit, TLS extension 51764 (0xca34), which wreq exposes
-//! no knob for.
+//! roxy, must reproduce real Chrome 148's JA4_r and peetprint — except for two
+//! extensions roxy cannot reproduce on a cold connection: TLS extension 51764
+//! (0xca34, no wreq knob) and 0x0029/41 (pre_shared_key, only sent on TLS 1.3
+//! session resumption).
 //!
 //! `#[ignore]` because it requires public network access. Run with:
 //!   cargo test -p roxy-proxy --test fingerprint_fidelity -- --ignored --nocapture
@@ -14,6 +15,9 @@ mod common;
 use common::{Fixture, FixtureBuilder};
 use roxy_proxy_lib::handler::FINGERPRINT_HEADER;
 use serde_json::Value;
+
+// To re-capture for a new Chrome version: visit https://tls.peet.ws/api/all in
+// real Chrome and copy `.tls.ja4_r` / `.tls.peetprint` from the JSON response.
 
 /// JA4_r of real Chrome 148 against tls.peet.ws, recorded 2026-05-14.
 const REAL_CHROME_148_JA4R: &str = "t13d1518h2_002f,0035,009c,009d,1301,1302,1303,c013,c014,c02b,c02c,c02f,c030,cca8,cca9_0005,000a,000b,000d,0012,0017,001b,0023,0029,002b,002d,0033,44cd,ca34,fe0d,ff01_0403,0804,0401,0503,0805,0501,0806,0601";
@@ -112,23 +116,34 @@ async fn captured_chrome_148_matches_real_ja4r_and_peetprint() {
     assert_eq!(got.len(), 4, "unexpected JA4_r shape: {got_ja4r}");
     assert_eq!(got[1], real[1], "JA4_r cipher section mismatch");
     assert_eq!(got[3], real[3], "JA4_r sigalg section mismatch");
+    // Tokenize → filter → rejoin so the exclusion is position-independent
+    // (a string `.replace` would silently no-op if an excluded token ever
+    // landed at a list boundary in a future reference update).
+    let cleaned_real_exts = real[2]
+        .split(',')
+        .filter(|t| *t != "ca34" && *t != "0029")
+        .collect::<Vec<_>>()
+        .join(",");
     assert_eq!(
-        got[2],
-        real[2].replace("ca34,", "").replace("0029,", ""),
+        got[2], cleaned_real_exts,
         "JA4_r extension section mismatch (0xca34 and 0x0029/PSK excluded)"
     );
 
-    // peetprint: the final pipe-section is the sorted extension list; drop the
-    // two extensions roxy cannot reproduce on a cold connection — 51764 (no
-    // wreq knob) and 41 (pre_shared_key, session-resumption only). See the
-    // JA4_r comment above.
+    // peetprint's final `|`-section is the sorted extension list; filter the
+    // two excluded extensions from just that section, then rejoin.
+    let cleaned_peet = {
+        let (prefix, ext_section) = REAL_CHROME_148_PEETPRINT
+            .rsplit_once('|')
+            .expect("peetprint has pipe-delimited sections");
+        let cleaned_ext = ext_section
+            .split('-')
+            .filter(|t| *t != "51764" && *t != "41")
+            .collect::<Vec<_>>()
+            .join("-");
+        format!("{prefix}|{cleaned_ext}")
+    };
     assert_eq!(
-        got_peet,
-        REAL_CHROME_148_PEETPRINT
-            .replace("-51764", "")
-            .replace("-41-", "-"),
+        got_peet, cleaned_peet,
         "peetprint mismatch (51764 and 41/PSK excluded)"
     );
-
-    drop(dir);
 }
