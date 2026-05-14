@@ -283,6 +283,23 @@ mod tests {
     }
 
     #[test]
+    fn feature_toggles_omit_when_unset() {
+        let name = ProfileName::parse("captured-no-toggles").unwrap();
+        let tls = sample_tls(); // all toggles false / None
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        for needle in [
+            "enable_ocsp_stapling",
+            "enable_signed_cert_timestamps",
+            "enable_ech_grease",
+            "session_ticket",
+            "renegotiation",
+            "record_size_limit",
+        ] {
+            assert!(!toml.contains(needle), "unexpected {needle} in:\n{toml}");
+        }
+    }
+
+    #[test]
     fn write_profile_creates_dir_and_file() {
         let name = ProfileName::parse("written-profile").unwrap();
         let toml = render(&name, &sample_tls(), Some(&sample_http2()), None);

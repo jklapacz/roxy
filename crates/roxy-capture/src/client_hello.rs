@@ -36,12 +36,19 @@ pub struct CapturedTls {
     pub skipped_ciphers: Vec<u16>,
     /// Whether any GREASE value was observed in the ClientHello.
     pub grease: bool,
+    /// status_request extension present → OCSP stapling requested.
     pub enable_ocsp_stapling: bool,
+    /// signed_certificate_timestamp extension present.
     pub enable_signed_cert_timestamps: bool,
+    /// encrypted_client_hello (0xfe0d) extension present.
     pub enable_ech_grease: bool,
+    /// session_ticket extension present.
     pub session_ticket: bool,
+    /// renegotiation_info extension present.
     pub renegotiation: bool,
+    /// record_size_limit extension value, if present.
     pub record_size_limit: Option<u16>,
+    /// pre_shared_key extension observed. Detection only — not emitted by render; a later task best-guesses the schema's pre_shared_key toggle from this.
     pub pre_shared_key_seen: bool,
 }
 
@@ -80,6 +87,7 @@ pub fn parse(record: &[u8]) -> anyhow::Result<CapturedTls> {
     let mut alpn = Vec::new();
     let mut supported_groups = Vec::new();
     let mut skipped_curves = Vec::new();
+    // --- TLS feature toggles ---
     let mut enable_ocsp_stapling = false;
     let mut enable_signed_cert_timestamps = false;
     let mut enable_ech_grease = false;
