@@ -163,6 +163,8 @@ fn decode_pseudo_order(body: &[u8], flags: u8) -> (Vec<String>, Option<CapturedS
         pad_len = *first as usize;
         block = rest;
     }
+    // Declared after the PADDED block so the PRIORITY-truncation early return
+    // below can return None unconditionally — nothing is parsed before this point.
     let mut stream_dependency = None;
     if flags & FLAG_PRIORITY != 0 {
         if block.len() < 5 {
@@ -374,5 +376,25 @@ mod tests {
         assert_eq!(dep.stream_id, 0);
         assert_eq!(dep.weight, 219);
         assert!(dep.exclusive);
+    }
+
+    #[test]
+    fn captures_non_exclusive_stream_dependency_with_id() {
+        let block = hpack_block(&[(":method", "GET")]);
+        let mut body = Vec::new();
+        // PRIORITY prefix: exclusive=0, dependency stream id=1, weight=7.
+        body.extend_from_slice(&[0x00, 0x00, 0x00, 0x01, 7]);
+        body.extend_from_slice(&block);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(PREFACE);
+        buf.extend_from_slice(&frame(FRAME_SETTINGS, 0, &settings_body(&[(0x2, 0)])));
+        buf.extend_from_slice(&frame(FRAME_HEADERS, 0x4 | 0x20, &body));
+        let h2 = parse_http2(&buf).expect("should parse");
+        let dep = h2
+            .headers_stream_dependency
+            .expect("priority should be captured");
+        assert_eq!(dep.stream_id, 1);
+        assert_eq!(dep.weight, 7);
+        assert!(!dep.exclusive);
     }
 }

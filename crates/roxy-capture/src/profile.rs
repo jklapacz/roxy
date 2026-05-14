@@ -234,6 +234,7 @@ fn join_nums(nums: &[u16]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::h2::CapturedStreamDependency;
 
     fn sample_tls() -> CapturedTls {
         CapturedTls {
@@ -456,5 +457,35 @@ mod tests {
             Some(b"h2"),
         );
         assert!(!toml.contains("extension_permutation"), "toml:\n{toml}");
+    }
+
+    #[test]
+    fn headers_stream_dependency_round_trips() {
+        let name = ProfileName::parse("captured-dep").unwrap();
+        let mut http2 = sample_http2();
+        http2.headers_stream_dependency = Some(CapturedStreamDependency {
+            stream_id: 1,
+            weight: 255,
+            exclusive: false,
+        });
+        let toml = render(&name, &sample_tls(), Some(&http2), Some(b"h2"));
+        assert!(
+            toml.contains("[http2.headers_stream_dependency]"),
+            "toml:\n{toml}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("captured-dep.toml");
+        std::fs::write(&path, &toml).unwrap();
+        let profile = roxy_impersonate::CustomProfile::load(&path)
+            .expect("rendered TOML with stream dependency must load");
+        let dep = profile
+            .spec
+            .http2
+            .headers_stream_dependency
+            .expect("dependency should round-trip");
+        assert_eq!(dep.stream_id, 1);
+        assert_eq!(dep.weight, 255);
+        assert!(!dep.exclusive);
     }
 }
