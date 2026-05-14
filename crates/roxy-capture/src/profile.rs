@@ -113,6 +113,29 @@ pub fn render(
             string_array(&tls.cert_compression)
         ));
     }
+    if tls.grease {
+        out.push_str(
+            "permute_extensions = true   # guessed: not observable from a single capture\n",
+        );
+        out.push_str("aes_hw_override = true   # guessed: not observable on the wire\n");
+        if tls.pre_shared_key_seen {
+            out.push_str("pre_shared_key = true\n");
+        } else {
+            out.push_str(
+                "pre_shared_key = true   # guessed: PSK only appears on session resumption\n",
+            );
+        }
+    } else {
+        if tls.pre_shared_key_seen {
+            out.push_str("pre_shared_key = true\n");
+        }
+        if !tls.extensions.is_empty() {
+            out.push_str(&format!(
+                "extension_permutation = {}\n",
+                string_array(&tls.extensions)
+            ));
+        }
+    }
     out.push('\n');
 
     out.push_str("[http2]\n");
@@ -327,5 +350,55 @@ mod tests {
         let path = write_profile(&nested, &name, &toml).unwrap();
         assert_eq!(path, nested.join("written-profile.toml"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), toml);
+    }
+
+    #[test]
+    fn grease_client_gets_best_guess_trio() {
+        let name = ProfileName::parse("captured-guess").unwrap();
+        let mut tls = sample_tls();
+        tls.grease = true;
+        tls.pre_shared_key_seen = false;
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        assert!(
+            toml.contains("permute_extensions = true   # guessed"),
+            "toml:\n{toml}"
+        );
+        assert!(
+            toml.contains("aes_hw_override = true   # guessed"),
+            "toml:\n{toml}"
+        );
+        assert!(
+            toml.contains("pre_shared_key = true   # guessed"),
+            "toml:\n{toml}"
+        );
+        assert!(!toml.contains("extension_permutation"), "toml:\n{toml}");
+    }
+
+    #[test]
+    fn non_grease_client_gets_extension_permutation() {
+        let name = ProfileName::parse("captured-fixed").unwrap();
+        let mut tls = sample_tls();
+        tls.grease = false;
+        tls.extensions = vec!["server_name".into(), "supported_groups".into()];
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        assert!(
+            toml.contains(r#"extension_permutation = ["server_name", "supported_groups"]"#),
+            "toml:\n{toml}"
+        );
+        assert!(!toml.contains("# guessed"), "toml:\n{toml}");
+    }
+
+    #[test]
+    fn psk_seen_emits_plain_pre_shared_key() {
+        let name = ProfileName::parse("captured-psk").unwrap();
+        let mut tls = sample_tls();
+        tls.grease = true;
+        tls.pre_shared_key_seen = true;
+        let toml = render(&name, &tls, Some(&sample_http2()), Some(b"h2"));
+        assert!(toml.contains("pre_shared_key = true\n"), "toml:\n{toml}");
+        assert!(
+            !toml.contains("pre_shared_key = true   # guessed"),
+            "toml:\n{toml}"
+        );
     }
 }
