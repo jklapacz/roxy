@@ -91,10 +91,6 @@ async fn max_age_overrides_default_ttl() {
     // the default would have. The first call writes the entry; we sleep past
     // max-age and the second call must refetch (proving the configured 3600s
     // default did not apply).
-    //
-    // The 200ms sleep before the expiry sleep is the same workaround used in
-    // impersonate.rs for the tee_pump -> writer.finish() race tracked in
-    // roxy-2w1; remove once that lands.
     let f = FixtureBuilder::new()
         .default_ttl_seconds(3600)
         .build()
@@ -103,7 +99,7 @@ async fn max_age_overrides_default_ttl() {
     let url = cc_url(&f, "max-age=1");
 
     let _ = client.get(&url).send().await.unwrap().text().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.wait_for_n_finalizations(1).await;
 
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let r = client.get(&url).send().await.unwrap();
@@ -119,8 +115,7 @@ async fn max_age_overrides_default_ttl() {
 #[tokio::test]
 async fn no_directive_falls_back_to_default_ttl() {
     // `/cc?h=` emits no Cache-Control header at all; the default TTL applies
-    // and the second request is served from cache. Sleep mirrors the
-    // tee_pump finalization workaround (roxy-2w1).
+    // and the second request is served from cache.
     let f = FixtureBuilder::new()
         .default_ttl_seconds(3600)
         .build()
@@ -129,7 +124,7 @@ async fn no_directive_falls_back_to_default_ttl() {
     let url = cc_url(&f, "");
 
     let _ = client.get(&url).send().await.unwrap().text().await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    f.wait_for_n_finalizations(1).await;
     let _ = client.get(&url).send().await.unwrap().text().await.unwrap();
 
     assert_eq!(

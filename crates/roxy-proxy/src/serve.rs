@@ -1,3 +1,4 @@
+use crate::finalize_signal::FinalizeSignal;
 use crate::handler::Handler;
 use anyhow::Context;
 use roxy_cache::Cache;
@@ -21,6 +22,26 @@ const SNI_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(10_000) {
 pub async fn run(
     config_path: Option<&Path>,
     fingerprint_override: Option<&str>,
+) -> anyhow::Result<()> {
+    run_inner(config_path, fingerprint_override, None).await
+}
+
+/// Test-only entry that injects a shared `FinalizeSignal` into the Handler so
+/// fixtures can await cache materialization deterministically. Production
+/// callers should use `run`; the default signal it constructs is discarded.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn run_with_signal(
+    config_path: Option<&Path>,
+    fingerprint_override: Option<&str>,
+    signal: Arc<FinalizeSignal>,
+) -> anyhow::Result<()> {
+    run_inner(config_path, fingerprint_override, Some(signal)).await
+}
+
+async fn run_inner(
+    config_path: Option<&Path>,
+    fingerprint_override: Option<&str>,
+    finalize_signal: Option<Arc<FinalizeSignal>>,
 ) -> anyhow::Result<()> {
     let mut cfg = load_config(config_path)?;
     if let Some(f) = fingerprint_override {
@@ -80,6 +101,7 @@ pub async fn run(
             default_profile: cfg.impersonate.default_profile.clone(),
             strip_fingerprint_header: cfg.impersonate.strip_header,
             disconnect_cap: 50 * 1024 * 1024,
+            finalize_signal: finalize_signal.unwrap_or_else(|| Arc::new(FinalizeSignal::default())),
         }),
     };
 

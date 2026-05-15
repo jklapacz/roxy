@@ -11,6 +11,7 @@ use axum::{
     Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
+use roxy_proxy_lib::finalize_signal::FinalizeSignal;
 use rustls::pki_types::PrivateKeyDer;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -57,6 +58,9 @@ pub struct Fixture {
     /// roxy's cache directory. With caching disabled it must stay free of
     /// cache entries — see `cache_dir_is_empty`.
     pub cache_dir: PathBuf,
+    /// Shared with roxy's Handler so tests can await cache finalization
+    /// instead of sleeping. See `Fixture::wait_for_finalize`.
+    finalize_signal: Arc<FinalizeSignal>,
     _origin_handle: JoinHandle<()>,
     _roxy_handle: JoinHandle<anyhow::Result<()>>,
     _tmp: TempDir,
@@ -82,6 +86,37 @@ impl Fixture {
 
     pub fn upstream_hit_count(&self, key: &str) -> usize {
         self.hits.count(key)
+    }
+
+    /// Snapshot of how many cache writers tee_pump has consumed so far.
+    /// Combine with `wait_for_finalize_count` to await N more without
+    /// hardcoding a sleep — see `roxy-2w1`.
+    pub fn finalize_count(&self) -> u64 {
+        self.finalize_signal.count()
+    }
+
+    /// Wait until tee_pump has consumed at least `target` cache writers.
+    /// Test-side timeout (5s) keeps a wedged writer from hanging the suite.
+    pub async fn wait_for_finalize_count(&self, target: u64) {
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.finalize_signal.wait_for_count(target),
+        )
+        .await;
+        if result.is_err() {
+            panic!(
+                "timed out waiting for cache writer finalization (target={target}, current={})",
+                self.finalize_signal.count()
+            );
+        }
+    }
+
+    /// Wait for `n` more cache writer completions starting from the
+    /// current count. Convenient when a test has just issued requests it
+    /// expects roxy to cache.
+    pub async fn wait_for_n_finalizations(&self, n: u64) {
+        let target = self.finalize_count() + n;
+        self.wait_for_finalize_count(target).await;
     }
 
     /// True when roxy's cache directory holds no cache entries. `FsCache::open`
@@ -407,10 +442,12 @@ level = "warn"
     let roxy_cfg = roxy_config::load_from_path(&cfg_path).unwrap();
     let ca_dir = roxy_cfg.ca.dir.clone();
     let cfg_path_for_task = cfg_path.clone();
-    let roxy_handle =
-        tokio::spawn(
-            async move { roxy_proxy_lib::serve::run(Some(&cfg_path_for_task), None).await },
-        );
+    let finalize_signal = Arc::new(FinalizeSignal::default());
+    let signal_for_task = finalize_signal.clone();
+    let roxy_handle = tokio::spawn(async move {
+        roxy_proxy_lib::serve::run_with_signal(Some(&cfg_path_for_task), None, signal_for_task)
+            .await
+    });
     // wait until listener is up
     for _ in 0..50 {
         if tokio::net::TcpStream::connect(roxy_addr).await.is_ok() {
@@ -428,6 +465,7 @@ level = "warn"
         origin_ca,
         hits,
         cache_dir,
+        finalize_signal,
         _origin_handle: origin_handle,
         _roxy_handle: roxy_handle,
         _tmp: tmp,

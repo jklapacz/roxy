@@ -47,11 +47,10 @@ async fn impersonate_default_miss_then_hit() {
     let b1 = r1.text().await.unwrap();
     assert_eq!(b1, "cacheable-body");
 
-    // The tee_pump that finalizes the cache entry runs in a spawned task.
-    // For a fast small body the index row is usually written by the time
-    // r1.text() returns, but it is not guaranteed — a brief yield gives the
-    // background task time to commit before we issue the second request.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // tee_pump finalizes the cache entry on a spawned task. Block until
+    // that one writer is done before issuing the second request so the
+    // hit-count assertion is deterministic.
+    f.wait_for_n_finalizations(1).await;
 
     let r2 = c.get(&url).send().await.unwrap();
     assert_eq!(r2.status(), 200);
@@ -93,10 +92,9 @@ async fn profile_partition_in_cache() {
 
     assert_eq!(f.upstream_hit_count("/cacheable"), 2);
 
-    // Give the cache writer background tasks a chance to commit before we
-    // re-request — see the comment in `impersonate_default_miss_then_hit`
-    // for why this is needed (tee_pump → writer.finish() is asynchronous).
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Both writers must finalize before the third request so the cache
+    // hit is deterministic — see `roxy-2w1`.
+    f.wait_for_n_finalizations(2).await;
 
     // And a repeat of either fingerprint should now hit the cache.
     let r3 = c

@@ -1,4 +1,5 @@
 use crate::cache_directives;
+use crate::finalize_signal::FinalizeSignal;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use http::{Request, Response, StatusCode};
@@ -27,6 +28,11 @@ pub struct Handler<C: Cache + 'static> {
     pub default_profile: Option<String>,
     pub strip_fingerprint_header: bool,
     pub disconnect_cap: u64,
+    /// Fires whenever `tee_pump` consumes a cache writer. Production code
+    /// constructs and ignores this; the integration-test fixture awaits it
+    /// to avoid the 200ms sleep workaround for tee_pump finalization
+    /// (see `roxy-2w1` and `crate::finalize_signal`).
+    pub finalize_signal: Arc<FinalizeSignal>,
 }
 
 pub const FINGERPRINT_HEADER: &str = "x-roxy-fingerprint";
@@ -167,7 +173,14 @@ impl<C: Cache + 'static> Handler<C> {
         // Tee channel: client receives via stream; we also stream into the writer in the background.
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(32);
         let disconnect_cap = self.disconnect_cap;
-        tokio::spawn(tee_pump(resp_body, writer, tx, disconnect_cap));
+        let finalize_signal = self.finalize_signal.clone();
+        tokio::spawn(tee_pump(
+            resp_body,
+            writer,
+            tx,
+            disconnect_cap,
+            finalize_signal,
+        ));
 
         let mut builder_resp = http::Response::new(stream_to_body(rx));
         *builder_resp.status_mut() = resp_parts.status;
@@ -188,6 +201,7 @@ async fn tee_pump<B>(
     mut writer: Option<Box<dyn CacheWriter>>,
     tx: tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
     disconnect_cap: u64,
+    finalize_signal: Arc<FinalizeSignal>,
 ) where
     B: http_body::Body<Data = Bytes, Error = std::io::Error> + Unpin,
 {
@@ -200,6 +214,7 @@ async fn tee_pump<B>(
             Err(e) => {
                 if let Some(w) = writer.take() {
                     w.abort();
+                    finalize_signal.record();
                 }
                 tx.send(Err(std::io::Error::other(e))).await.ok();
                 return;
@@ -216,6 +231,7 @@ async fn tee_pump<B>(
                 tracing::warn!(error = %e, "cache write failed - aborting");
                 if let Some(w) = writer.take() {
                     w.abort();
+                    finalize_signal.record();
                 }
             }
         }
@@ -234,6 +250,7 @@ async fn tee_pump<B>(
                 );
                 if let Some(w) = writer.take() {
                     w.abort();
+                    finalize_signal.record();
                 }
                 return;
             }
@@ -244,6 +261,7 @@ async fn tee_pump<B>(
         if let Err(e) = w.finish().await {
             tracing::warn!(error = %e, "cache finalize failed");
         }
+        finalize_signal.record();
     }
 }
 
