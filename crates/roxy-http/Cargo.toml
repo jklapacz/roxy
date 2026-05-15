@@ -26,6 +26,9 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 pin-project-lite = { workspace = true }
+roxy-config = { workspace = true }
+base64 = "0.22"
+tower-service = "0.3"
 
 [dev-dependencies]
 axum = { version = "0.7", features = ["http2"] }

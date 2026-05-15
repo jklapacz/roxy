@@ -6,6 +6,8 @@ pub mod router;
 pub mod server;
 pub mod upstream;
 
+mod proxy_connector;
+
 pub use accept::{ConnHandler, Handler};
 pub use router::UpstreamRouter;
 pub use server::{serve_http_plain, serve_tls, BoxBody};
