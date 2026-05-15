@@ -30,9 +30,10 @@ impl ProxyEndpoint {
 
 /// Parse a proxy URL of the form `http://[user:pass@]host:port`.
 ///
-/// v1 accepts only the `http` scheme and requires an explicit port. A missing
-/// host, missing port, non-`http` scheme, or unparseable URL is a
-/// `ConfigError::Proxy` so misconfiguration fails fast at startup.
+/// v1 accepts only the `http` scheme and requires a port (HTTP's default 80 is
+/// also accepted when present in the URL). A missing host, missing port,
+/// non-`http` scheme, or unparseable URL is a `ConfigError::Proxy` so
+/// misconfiguration fails fast at startup.
 pub fn parse_proxy(raw: &str) -> Result<ProxyEndpoint, ConfigError> {
     let u = url::Url::parse(raw)
         .map_err(|e| ConfigError::Proxy(format!("invalid proxy URL {raw:?}: {e}")))?;
@@ -47,8 +48,18 @@ pub fn parse_proxy(raw: &str) -> Result<ProxyEndpoint, ConfigError> {
         .ok_or_else(|| ConfigError::Proxy(format!("proxy URL {raw:?} has no host")))?
         .to_string();
     let port = u
-        .port()
-        .ok_or_else(|| ConfigError::Proxy(format!("proxy URL {raw:?} has no explicit port")))?;
+        .port_or_known_default()
+        .ok_or_else(|| ConfigError::Proxy(format!("proxy URL {raw:?} has no port")))?;
+    if u.path() != "" && u.path() != "/" {
+        return Err(ConfigError::Proxy(format!(
+            "proxy URL {raw:?} must not include a path; expected http://[user:pass@]host:port"
+        )));
+    }
+    if u.query().is_some() || u.fragment().is_some() {
+        return Err(ConfigError::Proxy(format!(
+            "proxy URL {raw:?} must not include a query or fragment"
+        )));
+    }
     let auth = if u.username().is_empty() {
         None
     } else {
@@ -93,9 +104,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_port() {
-        let err = parse_proxy("http://corp-proxy").unwrap_err();
-        assert!(matches!(err, ConfigError::Proxy(_)), "got: {err:?}");
+    fn accepts_default_http_port_when_missing() {
+        let ep = parse_proxy("http://corp-proxy").unwrap();
+        assert_eq!(ep.host, "corp-proxy");
+        assert_eq!(ep.port, 80);
     }
 
     #[test]
@@ -108,5 +120,32 @@ mod tests {
     fn url_no_auth_omits_credentials() {
         let ep = parse_proxy("http://alice:s3cret@corp-proxy:8080").unwrap();
         assert_eq!(ep.url_no_auth(), "http://corp-proxy:8080");
+    }
+
+    #[test]
+    fn accepts_explicit_default_port() {
+        let ep = parse_proxy("http://corp-proxy:80").unwrap();
+        assert_eq!(ep.host, "corp-proxy");
+        assert_eq!(ep.port, 80);
+    }
+
+    #[test]
+    fn brackets_ipv6_host() {
+        let ep = parse_proxy("http://[::1]:8080").unwrap();
+        assert_eq!(ep.host, "[::1]");
+        assert_eq!(ep.port, 8080);
+        assert_eq!(ep.url_no_auth(), "http://[::1]:8080");
+    }
+
+    #[test]
+    fn rejects_trailing_path() {
+        let err = parse_proxy("http://corp-proxy:8080/some/path").unwrap_err();
+        assert!(matches!(err, ConfigError::Proxy(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn rejects_trailing_query() {
+        let err = parse_proxy("http://corp-proxy:8080?x=1").unwrap_err();
+        assert!(matches!(err, ConfigError::Proxy(_)), "got: {err:?}");
     }
 }
