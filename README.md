@@ -96,6 +96,34 @@ identifier are omitted and noted in a comment at the top of the file.
 
 roxy now depends on BoringSSL via `wreq` + `boring2`. You'll need `cmake`, `perl`, and `clang` available on the builder. On macOS: `brew install cmake`. On Linux: `apt-get install cmake clang perl`.
 
+# Upstream proxy
+
+roxy can route its **outbound** connections through another HTTP proxy — a
+corporate egress proxy, or a commercial proxy service. v1 supports a single,
+statically-configured HTTP CONNECT proxy.
+
+## Configuration
+
+```toml
+[upstream]
+# Optional. Absent => roxy dials origins directly.
+# Form: http://[user:pass@]host:port — only the http scheme is supported,
+# and the port is required.
+proxy = "http://user:pass@corp-proxy:8080"
+```
+
+A malformed proxy URL, a non-`http` scheme, or a missing host/port fails at
+startup rather than at the first request.
+
+The proxy applies to both upstream paths: the default rustls path and the
+wreq-based fingerprint-emulation path. roxy `CONNECT`-tunnels to each origin
+through the proxy, then performs its own TLS over the tunnel — so origin TLS
+behavior (including fingerprint emulation) is unaffected.
+
+Basic-auth credentials in the URL userinfo are sent as a
+`Proxy-Authorization: Basic` header on the CONNECT request and are never
+written to logs.
+
 # Upgrading
 
 - **Cache key format changed**: the cache key now includes a profile-label component so different fingerprints don't share cache entries. Pre-existing `.cache` directories (typically `~/.local/share/roxy/cache`) will not be readable after upgrade — they're effectively invalidated. Clear the directory once after upgrading: `rm -rf ~/.local/share/roxy/cache`.
