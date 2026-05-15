@@ -19,6 +19,7 @@ pub struct Config {
     pub log: LogConfig,
     pub impersonate: ImpersonateConfig,
     pub capture: CaptureConfig,
+    pub upstream: UpstreamConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -93,6 +94,24 @@ impl Default for CaptureConfig {
     }
 }
 
+/// Upstream proxy configuration. v1 supports a single HTTP CONNECT proxy;
+/// absent => roxy dials origins directly. The `proxy` string is the serde
+/// representation — call [`UpstreamConfig::endpoint`] for the parsed form.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(default)]
+pub struct UpstreamConfig {
+    /// Optional `http://[user:pass@]host:port` upstream proxy.
+    pub proxy: Option<String>,
+}
+
+impl UpstreamConfig {
+    /// Parse the configured `proxy` string into a typed endpoint. `Ok(None)`
+    /// when no proxy is configured.
+    pub fn endpoint(&self) -> Result<Option<ProxyEndpoint>, ConfigError> {
+        self.proxy.as_deref().map(parse_proxy).transpose()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -102,6 +121,7 @@ impl Default for Config {
             log: LogConfig::default(),
             impersonate: ImpersonateConfig::default(),
             capture: CaptureConfig::default(),
+            upstream: UpstreamConfig::default(),
         }
     }
 }
@@ -156,6 +176,10 @@ impl Config {
         self.cache.dir = expand(&self.cache.dir)?;
         self.ca.dir = expand(&self.ca.dir)?;
         self.impersonate.profiles_dir = expand(&self.impersonate.profiles_dir)?;
+        // Validate the proxy URL at load time so misconfiguration fails fast
+        // at startup rather than at the first request. The parsed value is
+        // discarded here; callers re-parse via `UpstreamConfig::endpoint`.
+        self.upstream.endpoint()?;
         Ok(self)
     }
 }
@@ -256,5 +280,32 @@ mod tests {
         assert_eq!(c.impersonate.default_profile.as_deref(), Some("chrome-137"));
         assert!(!c.impersonate.strip_header);
         assert_eq!(c.impersonate.profiles_dir, PathBuf::from("./profiles"));
+    }
+
+    #[test]
+    fn upstream_section_defaults_to_no_proxy() {
+        let c = Config::default();
+        assert_eq!(c.upstream.proxy, None);
+        assert_eq!(c.upstream.endpoint().unwrap(), None);
+    }
+
+    #[test]
+    fn upstream_proxy_parses_from_toml() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"[upstream]"#).unwrap();
+        writeln!(f, r#"proxy = "http://corp-proxy:8080""#).unwrap();
+        let c = load_from_path(f.path()).unwrap();
+        let ep = c.upstream.endpoint().unwrap().unwrap();
+        assert_eq!(ep.host, "corp-proxy");
+        assert_eq!(ep.port, 8080);
+    }
+
+    #[test]
+    fn malformed_upstream_proxy_fails_at_load() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, r#"[upstream]"#).unwrap();
+        writeln!(f, r#"proxy = "socks5://corp-proxy:1080""#).unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::Proxy(_)), "got: {err:?}");
     }
 }
