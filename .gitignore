@@ -3,3 +3,6 @@
 .dolt/
 *.db
 .devenv
+.claude/settings.local.json
+roxy.toml
+target/

@@ -1,0 +1,38 @@
+# Captured by roxy-capture.
+# Negotiated ALPN: h2
+# NOTE: 1 TLS extension(s) had no roxy identifier and were omitted: 51764
+
+name = "chrome-148"
+
+[tls]
+alpn = ["h2", "http/1.1"]
+cipher_suites = ["TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256", "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA", "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA", "TLS_RSA_WITH_AES_128_GCM_SHA256", "TLS_RSA_WITH_AES_256_GCM_SHA384", "TLS_RSA_WITH_AES_128_CBC_SHA", "TLS_RSA_WITH_AES_256_CBC_SHA"]
+signature_algorithms = ["ecdsa_secp256r1_sha256", "rsa_pss_rsae_sha256", "rsa_pkcs1_sha256", "ecdsa_secp384r1_sha384", "rsa_pss_rsae_sha384", "rsa_pkcs1_sha384", "rsa_pss_rsae_sha512", "rsa_pkcs1_sha512"]
+supported_versions = ["TLS1.3", "TLS1.2"]
+supported_groups = ["X25519MLKEM768", "X25519", "P-256", "P-384"]
+grease = true
+enable_ocsp_stapling = true
+enable_signed_cert_timestamps = true
+enable_ech_grease = true
+session_ticket = true
+renegotiation = true
+alps_protocols = ["h2"]
+alps_use_new_codepoint = true
+cert_compression = ["brotli"]
+permute_extensions = true   # guessed: not observable from a single capture
+aes_hw_override = true   # guessed: not observable on the wire
+pre_shared_key = true
+
+[http2]
+header_table_size = 65536
+enable_push = false
+initial_window_size = 6291456
+initial_connection_window_size = 15728640
+max_header_list_size = 262144
+settings_order = ["HEADER_TABLE_SIZE", "ENABLE_PUSH", "INITIAL_WINDOW_SIZE", "MAX_HEADER_LIST_SIZE"]
+header_order = [":method", ":authority", ":scheme", ":path"]
+
+[http2.headers_stream_dependency]
+stream_id = 0
+weight = 255
+exclusive = true
