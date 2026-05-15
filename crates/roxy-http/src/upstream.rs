@@ -1,3 +1,4 @@
+use crate::proxy_connector::ProxyConnector;
 use bytes::Bytes;
 use http::{Request, Response};
 use http_body::{Body, Frame};
@@ -86,27 +87,36 @@ pub enum UpstreamError {
 
 #[derive(Clone)]
 pub struct UpstreamClient {
-    inner: Client<hyper_rustls::HttpsConnector<HttpConnector>, ClientBody>,
+    inner: Client<hyper_rustls::HttpsConnector<ProxyConnector>, ClientBody>,
 }
 
 impl UpstreamClient {
     pub fn new() -> Result<Self, UpstreamError> {
-        // Ensure a process-global rustls CryptoProvider is installed. When multiple
-        // backends (e.g. `ring` + `aws-lc-rs`) are present in the dep graph rustls
-        // cannot auto-select; install `ring` explicitly. Ignore the result: if
+        Self::with_proxy(None)
+    }
+
+    /// Construct an upstream client that routes outbound connections through
+    /// `proxy`, or directly when `proxy` is `None`. The CONNECT tunnel (when
+    /// a proxy is set) is established below the TLS layer, so TLS-to-origin
+    /// behavior is identical either way.
+    pub fn with_proxy(proxy: Option<roxy_config::ProxyEndpoint>) -> Result<Self, UpstreamError> {
+        // Ensure a process-global rustls CryptoProvider is installed. When
+        // multiple backends are present in the dep graph rustls cannot
+        // auto-select; install `ring` explicitly. Ignore the result: if
         // another component already installed a provider that is fine.
         let _ = rustls::crypto::ring::default_provider().install_default();
 
         let mut http = HttpConnector::new();
         http.set_nodelay(true);
         http.enforce_http(false);
+        let connector = ProxyConnector::new(http, proxy);
         let https = HttpsConnectorBuilder::new()
             .with_native_roots()
             .map_err(|e| UpstreamError::Uri(e.to_string()))?
             .https_or_http()
             .enable_http1()
             .enable_http2()
-            .wrap_connector(http);
+            .wrap_connector(connector);
         let inner = Client::builder(TokioExecutor::new())
             .pool_idle_timeout(Duration::from_secs(300))
             .pool_max_idle_per_host(32)

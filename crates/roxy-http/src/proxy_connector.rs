@@ -93,6 +93,75 @@ async fn read_connect_response(tcp: &mut TcpStream) -> Result<Vec<u8>, BoxError>
     }
 }
 
+/// A `tower::Service<Uri>` connector. With `proxy = None` it delegates
+/// straight to `HttpConnector` (the direct path, unchanged). With a proxy
+/// set, it dials the proxy, performs the CONNECT handshake to the real
+/// origin, and returns the resulting tunnel for the TLS layer above to wrap.
+#[derive(Clone)]
+pub struct ProxyConnector {
+    inner: HttpConnector,
+    proxy: Option<Arc<ProxyEndpoint>>,
+}
+
+impl ProxyConnector {
+    pub fn new(inner: HttpConnector, proxy: Option<ProxyEndpoint>) -> Self {
+        Self {
+            inner,
+            proxy: proxy.map(Arc::new),
+        }
+    }
+}
+
+impl Service<Uri> for ProxyConnector {
+    type Response = TokioIo<TcpStream>;
+    type Error = BoxError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // `HttpConnector` is always ready; nothing to back-pressure.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, dst: Uri) -> Self::Future {
+        let proxy = self.proxy.clone();
+        let mut inner = self.inner.clone();
+        Box::pin(async move {
+            let Some(ep) = proxy else {
+                // Direct path — behavior identical to a bare HttpConnector.
+                return inner.call(dst).await.map_err(|e| Box::new(e) as BoxError);
+            };
+
+            // Resolve the real origin host:port from the request URI before
+            // we point the dialer at the proxy address instead.
+            let host = dst
+                .host()
+                .ok_or_else(|| -> BoxError { "upstream uri has no host".into() })?
+                .to_string();
+            let port = dst.port_u16().unwrap_or_else(|| {
+                if dst.scheme_str() == Some("http") {
+                    80
+                } else {
+                    443
+                }
+            });
+
+            // Dial the proxy itself via HttpConnector (keeps DNS resolution
+            // and the configured TCP_NODELAY).
+            let proxy_uri: Uri = format!("http://{}:{}", ep.host, ep.port)
+                .parse()
+                .map_err(|e| -> BoxError { format!("bad proxy uri: {e}").into() })?;
+            let io = inner
+                .call(proxy_uri)
+                .await
+                .map_err(|e| Box::new(e) as BoxError)?;
+            let mut tcp = io.into_inner();
+
+            connect_tunnel(&mut tcp, &host, port, ep.auth.as_ref()).await?;
+            Ok(TokioIo::new(tcp))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +240,10 @@ mod tests {
             "got: {req:?}"
         );
         assert!(!req.contains("Proxy-Authorization"), "got: {req:?}");
+        assert!(
+            req.contains("Host: example.com:443\r\n"),
+            "expected Host header; got: {req:?}"
+        );
     }
 
     #[tokio::test]
@@ -212,5 +285,35 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("closed"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn upstream_client_routes_request_through_proxy() {
+        use crate::UpstreamClient;
+        use http_body_util::Empty;
+
+        // Proxy replies 200 then closes — enough to prove the request reached
+        // the CONNECT stage. The subsequent TLS handshake over the dead
+        // tunnel fails, so the request errors; the assertion is that the
+        // proxy was contacted with the right CONNECT target.
+        let (addr, captured) =
+            fake_proxy_endpoint(b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
+        let ep = ProxyEndpoint {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            auth: None,
+        };
+        let client = UpstreamClient::with_proxy(Some(ep)).unwrap();
+        let req = http::Request::get("https://example.invalid/")
+            .body(Empty::<bytes::Bytes>::new())
+            .unwrap();
+        // Expected to error (no real tunnel), but the proxy must have been hit.
+        let _ = client.send_empty(req).await;
+
+        let captured = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.starts_with("CONNECT example.invalid:443 HTTP/1.1\r\n"),
+            "proxy did not receive expected CONNECT; got: {captured:?}"
+        );
     }
 }
