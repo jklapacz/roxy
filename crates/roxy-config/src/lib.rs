@@ -61,6 +61,18 @@ pub struct ImpersonateConfig {
     pub profiles_dir: PathBuf,
     /// Strip the X-Roxy-Fingerprint header before forwarding upstream.
     pub strip_header: bool,
+    /// Seed the wreq trust store with the OS native CA bundle (same source
+    /// the rustls path uses via `.with_native_roots()`). Default `false`,
+    /// which leaves wreq on its bundled `webpki-roots`. Useful when roxy
+    /// sits behind a TLS-MITM proxy whose CA is already installed
+    /// system-wide.
+    pub use_native_certs: bool,
+    /// Optional extra CA PEM file appended to the wreq trust store. When set
+    /// without [`Self::use_native_certs`], this PEM **replaces** wreq's
+    /// default trust — appropriate when one private CA signs every origin
+    /// roxy will see (e.g. a TLS-MITM proxy). Path expansion (`~`, env vars)
+    /// is applied the same way as `cache.dir`.
+    pub trust_pem: Option<PathBuf>,
 }
 
 impl Default for ImpersonateConfig {
@@ -69,6 +81,8 @@ impl Default for ImpersonateConfig {
             default_profile: None,
             profiles_dir: PathBuf::from("./profiles"),
             strip_header: true,
+            use_native_certs: false,
+            trust_pem: None,
         }
     }
 }
@@ -176,6 +190,9 @@ impl Config {
         self.cache.dir = expand(&self.cache.dir)?;
         self.ca.dir = expand(&self.ca.dir)?;
         self.impersonate.profiles_dir = expand(&self.impersonate.profiles_dir)?;
+        if let Some(p) = self.impersonate.trust_pem.as_ref() {
+            self.impersonate.trust_pem = Some(expand(p)?);
+        }
         // Validate the proxy URL at load time so misconfiguration fails fast
         // at startup rather than at the first request. The parsed value is
         // discarded here; callers re-parse via `UpstreamConfig::endpoint`.

@@ -108,32 +108,45 @@ fn build_impersonate(
     let customs = roxy_impersonate::CustomProfile::load_dir(&cfg.impersonate.profiles_dir)
         .context("load custom profiles")?;
 
-    // Test-only: ROXY_TEST_EXTRA_ROOT_PEM_PATH lets the integration test
-    // fixture inject a private CA so the impersonate client trusts the
-    // test fixture's fake origin. Both the env-var read and the unsafe
-    // constructor it calls are gated behind the `test-utils` feature so
-    // production builds cannot be tricked into swapping their trust
-    // store via a stray env var.
+    // Resolve the optional extra-trust PEM. Production: from
+    // `[impersonate] trust_pem`. Tests: the `ROXY_TEST_EXTRA_ROOT_PEM_PATH`
+    // env var (gated behind the `test-utils` feature) takes precedence so
+    // the integration fixture can inject its private CA without touching
+    // the user's config schema.
+    let mut trust_pem: Option<Vec<u8>> = None;
+    if let Some(path) = &cfg.impersonate.trust_pem {
+        trust_pem = Some(
+            std::fs::read(path)
+                .with_context(|| format!("impersonate.trust_pem at {}", path.display()))?,
+        );
+    }
     #[cfg(any(test, feature = "test-utils"))]
     {
         if let Some(pem_path) = std::env::var("ROXY_TEST_EXTRA_ROOT_PEM_PATH")
             .ok()
             .filter(|s| !s.is_empty())
         {
-            let pem = std::fs::read(&pem_path)
-                .with_context(|| format!("ROXY_TEST_EXTRA_ROOT_PEM_PATH={pem_path}"))?;
-            let client =
-                roxy_impersonate::ImpersonateClient::with_custom_and_extra_root_pem(customs, &pem)
-                    .context("impersonate client with extra root PEM")?
-                    .with_proxy(proxy.clone());
-            return Ok(Some(verify_default_profile(client, cfg)?));
+            trust_pem = Some(
+                std::fs::read(&pem_path)
+                    .with_context(|| format!("ROXY_TEST_EXTRA_ROOT_PEM_PATH={pem_path}"))?,
+            );
         }
     }
 
-    if cfg.impersonate.default_profile.is_none() && customs.is_empty() {
+    if cfg.impersonate.default_profile.is_none()
+        && customs.is_empty()
+        && !cfg.impersonate.use_native_certs
+        && trust_pem.is_none()
+    {
         return Ok(None);
     }
-    let client = roxy_impersonate::ImpersonateClient::with_custom(customs).with_proxy(proxy);
+    let mut client = roxy_impersonate::ImpersonateClient::with_custom(customs).with_proxy(proxy);
+    if cfg.impersonate.use_native_certs {
+        client = client.with_native_certs();
+    }
+    if let Some(pem) = trust_pem {
+        client = client.with_trust_pem(pem);
+    }
     Ok(Some(verify_default_profile(client, cfg)?))
 }
 

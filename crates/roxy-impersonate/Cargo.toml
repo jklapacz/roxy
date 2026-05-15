@@ -27,6 +27,7 @@ anyhow = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }
 roxy-config = { workspace = true }
+rustls-native-certs = "0.8"
 
 [dev-dependencies]
 tempfile = "3.13"

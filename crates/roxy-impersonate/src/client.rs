@@ -23,15 +23,19 @@ pub struct ImpersonateClient {
     /// builtin entry under the same name.
     custom: HashMap<String, wreq::Emulation>,
     clients: Arc<RwLock<HashMap<String, wreq::Client>>>,
-    /// Optional certificate store applied to every lazily-built `wreq::Client`.
+    /// Whether to seed the wreq trust store with the OS native CA certs
+    /// (`rustls_native_certs::load_native_certs`). When `false` and `trust_pem`
+    /// is `None`, wreq uses its bundled default (webpki-roots).
     ///
-    /// Defaults to `None`, meaning wreq uses its own default trust store (the
-    /// webpki roots when the `webpki-roots` feature is enabled). When set, the
-    /// supplied store fully replaces wreq's default. Constructed via
-    /// [`Self::with_custom_and_extra_root_pem`] for the integration-test
-    /// scenario where the upstream is signed by a private (test) CA that
-    /// is not in webpki-roots.
-    cert_store: Option<wreq::tls::CertStore>,
+    /// Useful when roxy sits behind a TLS-MITM proxy whose CA is already
+    /// installed in the system trust store — set this to true and wreq picks
+    /// up the same chain rustls already does via `.with_native_roots()`.
+    trust_native_certs: bool,
+    /// Optional extra CA PEM bundle appended to the wreq trust store, in
+    /// addition to whatever `trust_native_certs` includes (or replacing the
+    /// default entirely if both this and `trust_native_certs` are the only
+    /// inputs). PEM bytes are kept raw and parsed at wreq-client build time.
+    trust_pem: Option<Vec<u8>>,
     /// Optional upstream proxy applied to every lazily-built `wreq::Client`.
     /// `None` => wreq dials origins directly.
     proxy: Option<roxy_config::ProxyEndpoint>,
@@ -54,52 +58,37 @@ impl ImpersonateClient {
     /// logged. Collisions within the custom set itself keep the first one and
     /// log a warning for subsequent duplicates.
     pub fn with_custom(customs: Vec<CustomProfile>) -> Self {
-        Self::build(customs, None)
+        Self::build(customs)
     }
 
     /// Route every lazily-built `wreq::Client` through `proxy`. `None` leaves
     /// the client dialing origins directly. Chainable on top of any
-    /// constructor (`new`, `with_custom`, `with_custom_and_extra_root_pem`).
+    /// constructor.
     pub fn with_proxy(mut self, proxy: Option<roxy_config::ProxyEndpoint>) -> Self {
         self.proxy = proxy;
         self
     }
 
-    /// Like [`Self::with_custom`] but installs an explicit TLS trust store
-    /// from the supplied PEM-encoded root certificate(s). The supplied store
-    /// REPLACES wreq's default trust (webpki-roots), so callers must include
-    /// every CA they need to verify upstream peers.
-    ///
-    /// Intended primarily for integration tests that need to talk to a fake
-    /// origin signed by a private CA — wreq's `webpki-roots` default trust
-    /// store does not consult `SSL_CERT_FILE`, so test code must supply the
-    /// test CA explicitly. Production callers wanting "webpki + extras"
-    /// must concatenate the public root PEMs with their internal root PEM
-    /// in `extra_root_pem`.
-    ///
-    /// Gated behind the `test-utils` Cargo feature (and `cfg(test)` for
-    /// internal unit tests) so this footgun is not present in production
-    /// binaries. Production callers should never need this constructor.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_custom_and_extra_root_pem(
-        customs: Vec<CustomProfile>,
-        extra_root_pem: &[u8],
-    ) -> Result<Self, ImpersonateError> {
-        // Build a cert store containing ONLY the supplied PEM root(s). The
-        // resulting store replaces wreq's default webpki trust — that is
-        // acceptable for integration tests where the wreq client only talks
-        // to a fake origin signed by the supplied CA. Production callers
-        // wanting "webpki + extras" must instead pass a PEM stack that
-        // includes both the public CAs they care about and their internal
-        // root(s).
-        let store = wreq::tls::CertStore::builder()
-            .add_stack_pem_certs(extra_root_pem)
-            .build()
-            .map_err(ImpersonateError::Wreq)?;
-        Ok(Self::build(customs, Some(store)))
+    /// Seed the wreq trust store with the OS native CA certs. Mirrors the
+    /// behavior of the rustls path's `.with_native_roots()`. When combined
+    /// with [`Self::with_trust_pem`], the PEM bytes are appended on top of
+    /// the native roots.
+    pub fn with_native_certs(mut self) -> Self {
+        self.trust_native_certs = true;
+        self
     }
 
-    fn build(customs: Vec<CustomProfile>, cert_store: Option<wreq::tls::CertStore>) -> Self {
+    /// Append a CA PEM bundle to the wreq trust store. When called without
+    /// [`Self::with_native_certs`], the PEM **replaces** wreq's default
+    /// webpki-roots — so the supplied bundle must include every CA needed
+    /// to verify upstream peers. Useful when roxy sits behind a TLS-MITM
+    /// proxy that signs every origin with a single private CA.
+    pub fn with_trust_pem(mut self, pem: Vec<u8>) -> Self {
+        self.trust_pem = Some(pem);
+        self
+    }
+
+    fn build(customs: Vec<CustomProfile>) -> Self {
         let mut builtin = HashMap::new();
         for p in Profile::all() {
             builtin.insert(p.name().to_string(), *p);
@@ -129,9 +118,36 @@ impl ImpersonateClient {
             builtin,
             custom,
             clients: Arc::new(RwLock::new(HashMap::new())),
-            cert_store,
+            trust_native_certs: false,
+            trust_pem: None,
             proxy: None,
         }
+    }
+
+    /// Build a wreq `CertStore` from the configured trust sources. Returns
+    /// `Ok(None)` when neither source is configured — in which case wreq uses
+    /// its built-in default (webpki-roots).
+    fn build_cert_store(&self) -> Result<Option<wreq::tls::CertStore>, ImpersonateError> {
+        if !self.trust_native_certs && self.trust_pem.is_none() {
+            return Ok(None);
+        }
+        let mut b = wreq::tls::CertStore::builder();
+        if self.trust_native_certs {
+            let result = rustls_native_certs::load_native_certs();
+            if !result.errors.is_empty() {
+                tracing::warn!(
+                    error_count = result.errors.len(),
+                    "load_native_certs returned non-fatal errors"
+                );
+            }
+            for cert in &result.certs {
+                b = b.add_der_cert(cert.as_ref());
+            }
+        }
+        if let Some(pem) = &self.trust_pem {
+            b = b.add_stack_pem_certs(pem.as_slice());
+        }
+        b.build().map(Some).map_err(ImpersonateError::Wreq)
     }
 
     /// Returns true if a profile with the given label is registered (builtin
@@ -183,8 +199,8 @@ impl ImpersonateClient {
             // but treat it as an unknown label rather than panicking.
             return Err(ImpersonateError::UnknownFingerprint(label.to_string()));
         };
-        if let Some(store) = &self.cert_store {
-            builder = builder.cert_store(store.clone());
+        if let Some(store) = self.build_cert_store()? {
+            builder = builder.cert_store(store);
         }
         if let Some(ep) = &self.proxy {
             // wreq's `Proxy` mirrors reqwest's API. Credentials are passed via

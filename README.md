@@ -124,6 +124,35 @@ Basic-auth credentials in the URL userinfo are sent as a
 `Proxy-Authorization: Basic` header on the CONNECT request and are never
 written to logs.
 
+## Trusting a MITM proxy's CA
+
+Some upstream proxies (powhttp, mitmproxy, Charles, Burp, corporate
+break-and-inspect appliances) terminate TLS on the CONNECT tunnel and
+re-encrypt with their own CA. roxy needs to trust that CA on **both** upstream
+paths.
+
+- The **rustls path** uses `with_native_roots()`, so the proxy's CA is picked
+  up automatically once it's installed in the OS trust store.
+- The **wreq (fingerprint) path** ships with its own bundled `webpki-roots` and
+  does NOT consult system trust by default. Use one of these knobs:
+
+```toml
+[impersonate]
+# Seed wreq's trust store with the OS native CA bundle. Same source the
+# rustls path uses. The right choice when the MITM CA is already installed
+# system-wide.
+use_native_certs = true
+
+# Optionally append an extra CA PEM file. When used without
+# `use_native_certs`, this PEM REPLACES wreq's default trust — appropriate
+# when one private CA signs every origin roxy will see.
+trust_pem = "./powhttp.pem"
+```
+
+Without either knob, the wreq path uses `webpki-roots` and will fail with
+`client error (Connect)` (a wrapped TLS handshake failure) when a MITM proxy
+presents a private-CA-signed cert.
+
 # Upgrading
 
 - **Cache key format changed**: the cache key now includes a profile-label component so different fingerprints don't share cache entries. Pre-existing `.cache` directories (typically `~/.local/share/roxy/cache`) will not be readable after upgrade — they're effectively invalidated. Clear the directory once after upgrading: `rm -rf ~/.local/share/roxy/cache`.
