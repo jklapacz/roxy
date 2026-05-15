@@ -13,4 +13,7 @@ pub enum ConfigError {
 
     #[error("path expansion: {0}")]
     Expand(String),
+
+    #[error("upstream proxy config: {0}")]
+    Proxy(String),
 }

@@ -3,6 +3,9 @@
 mod error;
 pub use error::ConfigError;
 
+mod proxy;
+pub use proxy::{parse_proxy, ProxyAuth, ProxyEndpoint};
+
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
