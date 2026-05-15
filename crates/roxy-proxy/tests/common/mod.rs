@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 #![allow(dead_code)]
 
+pub mod fake_proxy;
 pub mod trust;
 
 use axum::{
@@ -134,6 +135,7 @@ pub struct FixtureBuilder {
     profiles_dir: Option<PathBuf>,
     inject_origin_ca_into_wreq: bool,
     cache_enabled: bool,
+    upstream_proxy: Option<String>,
 }
 
 impl FixtureBuilder {
@@ -144,6 +146,7 @@ impl FixtureBuilder {
             profiles_dir: None,
             inject_origin_ca_into_wreq: false,
             cache_enabled: true,
+            upstream_proxy: None,
         }
     }
 
@@ -156,6 +159,13 @@ impl FixtureBuilder {
     /// request but never serves from or writes to the cache.
     pub fn cache_enabled(mut self, v: bool) -> Self {
         self.cache_enabled = v;
+        self
+    }
+
+    /// Configure roxy's `[upstream] proxy`. The value is written verbatim into
+    /// the generated roxy.toml.
+    pub fn upstream_proxy(mut self, url: impl Into<String>) -> Self {
+        self.upstream_proxy = Some(url.into());
         self
     }
 
@@ -368,6 +378,9 @@ level = "warn"
         if let Some(dir) = &b.profiles_dir {
             cfg_text.push_str(&format!("profiles_dir = \"{}\"\n", dir.display()));
         }
+    }
+    if let Some(proxy) = &b.upstream_proxy {
+        cfg_text.push_str(&format!("[upstream]\nproxy = \"{proxy}\"\n"));
     }
     std::fs::write(&cfg_path, cfg_text).unwrap();
     let roxy_cfg = roxy_config::load_from_path(&cfg_path).unwrap();
