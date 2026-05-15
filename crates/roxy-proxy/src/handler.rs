@@ -1,3 +1,4 @@
+use crate::cache_directives;
 use bytes::Bytes;
 use futures::TryStreamExt;
 use http::{Request, Response, StatusCode};
@@ -138,8 +139,10 @@ impl<C: Cache + 'static> Handler<C> {
         };
 
         let status = resp.status();
-        let cache_eligible = status.is_success() || status.is_redirection();
         let (resp_parts, resp_body) = resp.into_parts();
+        let directives = cache_directives::parse(&resp_parts.headers);
+        let status_eligible = status.is_success() || status.is_redirection();
+        let cache_eligible = status_eligible && directives.should_cache();
 
         // Build writer only when caching is enabled and this response is
         // eligible. With caching disabled, `writer` stays None and `tee_pump`
@@ -149,7 +152,8 @@ impl<C: Cache + 'static> Handler<C> {
                 status: status.as_u16(),
                 headers: header_pairs(&resp_parts.headers),
             };
-            match self.cache.begin_store(&key, meta, self.default_ttl).await {
+            let ttl = directives.effective_ttl(self.default_ttl);
+            match self.cache.begin_store(&key, meta, ttl).await {
                 Ok(w) => Some(w),
                 Err(e) => {
                     tracing::warn!(error = %e, "begin_store failed - pass-through");

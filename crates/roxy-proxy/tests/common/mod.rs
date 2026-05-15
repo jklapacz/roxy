@@ -296,6 +296,27 @@ async fn spawn_fixture_with(b: FixtureBuilder) -> Fixture {
                 },
             ),
         )
+        // `/cc` returns a small body and stamps the Cache-Control response
+        // header from `?h=...`. Tests use it to drive roxy's response-side
+        // Cache-Control handling (no-store / private / max-age) without
+        // baking each variant into the fake origin.
+        .route(
+            "/cc",
+            get(
+                |State(s): State<OriginState>,
+                 Query(q): Query<HashMap<String, String>>| async move {
+                    let h = q.get("h").cloned().unwrap_or_default();
+                    s.hits.bump(&format!("/cc?h={h}"));
+                    let mut headers = axum::http::HeaderMap::new();
+                    if !h.is_empty() {
+                        if let Ok(v) = axum::http::HeaderValue::from_str(&h) {
+                            headers.insert(axum::http::header::CACHE_CONTROL, v);
+                        }
+                    }
+                    (headers, "cc-body")
+                },
+            ),
+        )
         // `/echo-headers` returns the request headers in the body, one per
         // line. Tests use this to verify that the X-Roxy-Fingerprint header
         // is stripped before upstream forwarding.
