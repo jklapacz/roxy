@@ -31,6 +31,11 @@ pub async fn run(
         }
     }
 
+    // Parse the optional upstream proxy. `load_config` already validated the
+    // URL at load time, so this re-parse is guaranteed to succeed; the `?` is
+    // kept for the file-absent path that builds `Config::default()`.
+    let upstream_proxy = cfg.upstream.endpoint()?;
+
     let cache = Arc::new(FsCache::open(&cfg.cache.dir).context("open cache")?);
     let evicted = cache.cleanup_tmp().context("cleanup tmp")?;
     if evicted > 0 {
@@ -61,8 +66,9 @@ pub async fn run(
         tracing::info!(addr = %cfg.capture.listen, "capture server enabled");
     }
 
-    let rustls = roxy_http::UpstreamClient::new().context("upstream client")?;
-    let impersonate = build_impersonate(&cfg)?;
+    let rustls =
+        roxy_http::UpstreamClient::with_proxy(upstream_proxy.clone()).context("upstream client")?;
+    let impersonate = build_impersonate(&cfg, upstream_proxy)?;
     let router = Arc::new(roxy_http::UpstreamRouter::new(rustls, impersonate));
 
     let handler = ProxyConnHandler {
@@ -95,7 +101,10 @@ pub async fn run(
 /// in the registered set (builtins + customs), bailing fast with a listing
 /// of available profiles so operators see misconfiguration at startup, not
 /// at first request.
-fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::ImpersonateClient>> {
+fn build_impersonate(
+    cfg: &Config,
+    proxy: Option<roxy_config::ProxyEndpoint>,
+) -> anyhow::Result<Option<roxy_impersonate::ImpersonateClient>> {
     let customs = roxy_impersonate::CustomProfile::load_dir(&cfg.impersonate.profiles_dir)
         .context("load custom profiles")?;
 
@@ -115,7 +124,8 @@ fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::Im
                 .with_context(|| format!("ROXY_TEST_EXTRA_ROOT_PEM_PATH={pem_path}"))?;
             let client =
                 roxy_impersonate::ImpersonateClient::with_custom_and_extra_root_pem(customs, &pem)
-                    .context("impersonate client with extra root PEM")?;
+                    .context("impersonate client with extra root PEM")?
+                    .with_proxy(proxy.clone());
             return Ok(Some(verify_default_profile(client, cfg)?));
         }
     }
@@ -123,7 +133,7 @@ fn build_impersonate(cfg: &Config) -> anyhow::Result<Option<roxy_impersonate::Im
     if cfg.impersonate.default_profile.is_none() && customs.is_empty() {
         return Ok(None);
     }
-    let client = roxy_impersonate::ImpersonateClient::with_custom(customs);
+    let client = roxy_impersonate::ImpersonateClient::with_custom(customs).with_proxy(proxy);
     Ok(Some(verify_default_profile(client, cfg)?))
 }
 
