@@ -131,7 +131,8 @@ impl<C: Cache + 'static> Handler<C> {
             }
             Err(e) => {
                 let kind = upstream_kind(&e);
-                tracing::warn!(error = %e, profile = %label, host = %authority, kind = %kind, "upstream send failed");
+                let chain = error_chain(&e);
+                tracing::warn!(error = %e, error_chain = %chain, profile = %label, host = %authority, kind = %kind, "upstream send failed");
                 return Ok(bad_gateway("roxy: upstream error"));
             }
         };
@@ -377,6 +378,21 @@ fn build_cache_key_and_warn<B>(
         }
     }
     key
+}
+
+/// Walk the error's `source()` chain and join each step's Display with `" -> "`.
+/// Surfaces causes that the top-level `Display` hides (e.g. wreq wraps its
+/// transport errors as `"client error (Connect)"` and stuffs the real cause in
+/// `source()`).
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut current = e.source();
+    while let Some(err) = current {
+        out.push_str(" -> ");
+        out.push_str(&err.to_string());
+        current = err.source();
+    }
+    out
 }
 
 fn upstream_kind(e: &UpstreamError) -> &'static str {
