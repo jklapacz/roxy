@@ -32,6 +32,9 @@ pub struct ImpersonateClient {
     /// scenario where the upstream is signed by a private (test) CA that
     /// is not in webpki-roots.
     cert_store: Option<wreq::tls::CertStore>,
+    /// Optional upstream proxy applied to every lazily-built `wreq::Client`.
+    /// `None` => wreq dials origins directly.
+    proxy: Option<roxy_config::ProxyEndpoint>,
 }
 
 impl Default for ImpersonateClient {
@@ -52,6 +55,14 @@ impl ImpersonateClient {
     /// log a warning for subsequent duplicates.
     pub fn with_custom(customs: Vec<CustomProfile>) -> Self {
         Self::build(customs, None)
+    }
+
+    /// Route every lazily-built `wreq::Client` through `proxy`. `None` leaves
+    /// the client dialing origins directly. Chainable on top of any
+    /// constructor (`new`, `with_custom`, `with_custom_and_extra_root_pem`).
+    pub fn with_proxy(mut self, proxy: Option<roxy_config::ProxyEndpoint>) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     /// Like [`Self::with_custom`] but installs an explicit TLS trust store
@@ -119,6 +130,7 @@ impl ImpersonateClient {
             custom,
             clients: Arc::new(RwLock::new(HashMap::new())),
             cert_store,
+            proxy: None,
         }
     }
 
@@ -173,6 +185,16 @@ impl ImpersonateClient {
         };
         if let Some(store) = &self.cert_store {
             builder = builder.cert_store(store.clone());
+        }
+        if let Some(ep) = &self.proxy {
+            // wreq's `Proxy` mirrors reqwest's API. Credentials are passed via
+            // `basic_auth` rather than embedded in the URL so they never end
+            // up in a logged proxy URL string.
+            let mut p = wreq::Proxy::all(ep.url_no_auth())?;
+            if let Some(a) = &ep.auth {
+                p = p.basic_auth(&a.username, &a.password);
+            }
+            builder = builder.proxy(p);
         }
         let client = builder.build()?;
         w.insert(label.to_string(), client.clone());
@@ -275,6 +297,23 @@ mod tests {
             client.profile_names().len(),
             crate::profile::Profile::all().len()
         );
+    }
+
+    #[test]
+    fn with_proxy_sets_the_field() {
+        let ep = roxy_config::ProxyEndpoint {
+            host: "corp-proxy".to_string(),
+            port: 8080,
+            auth: None,
+        };
+        let c = ImpersonateClient::new().with_proxy(Some(ep.clone()));
+        assert_eq!(c.proxy, Some(ep));
+    }
+
+    #[test]
+    fn no_proxy_by_default() {
+        let c = ImpersonateClient::new();
+        assert_eq!(c.proxy, None);
     }
 }
 

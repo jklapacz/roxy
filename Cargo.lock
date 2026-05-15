@@ -2065,6 +2065,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "pin-project-lite",
+ "roxy-config",
  "serde",
  "tempfile",
  "thiserror 1.0.69",
