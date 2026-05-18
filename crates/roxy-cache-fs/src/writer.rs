@@ -58,6 +58,8 @@ pub struct FsWriter {
     ttl: Duration,
     cache_dir: PathBuf,
     conn: Arc<Mutex<Connection>>,
+    vary_selector: Vec<u8>,
+    vary_headers: Option<String>,
 }
 
 fn closed_err() -> io::Error {
@@ -141,8 +143,8 @@ impl CacheWriter for FsWriter {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     self.key.as_bytes(),
-                    Vec::<u8>::new(),    // empty selector (real selector lands in Task 5)
-                    Option::<String>::None,
+                    self.vary_selector.clone(),
+                    self.vary_headers.clone(),
                     hash.as_slice(),
                     self.meta.status as i64,
                     headers_json,
@@ -167,57 +169,82 @@ impl Cache for FsCache {
     async fn lookup(
         &self,
         key: &CacheKey,
-        _req_headers: &roxy_cache::ReqHeaders,
+        req_headers: &roxy_cache::ReqHeaders,
     ) -> Result<Option<CachedResponse>, CacheError> {
         use futures::StreamExt;
-        let row = {
+        let candidates: Vec<(Vec<u8>, Option<String>, Vec<u8>, i64, String, i64, i64)> = {
             let conn = self
                 .conn
                 .lock()
                 .map_err(|_| CacheError::Backend("mutex".into()))?;
-            conn.query_row(
-                "SELECT content_hash, status, headers_json, created_at, ttl_seconds
-                 FROM entries WHERE key = ?1 AND vary_selector = ?2",
-                rusqlite::params![key.as_bytes(), Vec::<u8>::new()],
-                |r| {
-                    let content_hash: Vec<u8> = r.get(0)?;
-                    let status: i64 = r.get(1)?;
-                    let headers_json: String = r.get(2)?;
-                    let created_at: i64 = r.get(3)?;
-                    let ttl_seconds: i64 = r.get(4)?;
-                    Ok((content_hash, status, headers_json, created_at, ttl_seconds))
+            let mut stmt = conn
+                .prepare(
+                    "SELECT vary_selector, vary_headers, content_hash, status, headers_json, created_at, ttl_seconds
+                     FROM entries WHERE key = ?1
+                     ORDER BY CASE WHEN vary_headers IS NULL THEN 1 ELSE 0 END",
+                )
+                .map_err(|e| CacheError::Backend(e.to_string()))?;
+            let rows = stmt
+                .query_map([key.as_bytes()], |r| {
+                    Ok((
+                        r.get::<_, Vec<u8>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, i64>(6)?,
+                    ))
+                })
+                .map_err(|e| CacheError::Backend(e.to_string()))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(|e| CacheError::Backend(e.to_string()))?);
+            }
+            out
+        };
+
+        for (
+            vary_selector,
+            vary_headers,
+            content_hash,
+            status,
+            headers_json,
+            created_at,
+            ttl_seconds,
+        ) in candidates
+        {
+            let expected = roxy_cache::compute_selector(vary_headers.as_deref(), req_headers);
+            if expected != vary_selector {
+                continue;
+            }
+            let hex = hex::encode(&content_hash);
+            let path = blob_path(&self.cache_dir, &hex);
+            let file = tokio::fs::File::open(&path).await.map_err(CacheError::Io)?;
+            let reader = tokio_util::io::ReaderStream::new(file);
+            let body: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> =
+                reader.boxed();
+
+            let headers: Vec<(String, Vec<u8>)> = serde_json::from_str(&headers_json)
+                .map_err(|e| CacheError::Corrupted(e.to_string()))?;
+
+            let created = SystemTime::UNIX_EPOCH + Duration::from_secs(created_at as u64);
+            let ttl = Duration::from_secs(ttl_seconds as u64);
+            let resp = CachedResponse {
+                meta: ResponseMeta {
+                    status: status as u16,
+                    headers,
                 },
-            )
-            .ok()
-        };
-        let Some((content_hash, status, headers_json, created_at, ttl_seconds)) = row else {
-            return Ok(None);
-        };
-        let hex = hex::encode(&content_hash);
-        let path = blob_path(&self.cache_dir, &hex);
-        let file = tokio::fs::File::open(&path).await.map_err(CacheError::Io)?;
-        let reader = tokio_util::io::ReaderStream::new(file);
-        let body: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> =
-            reader.boxed();
-
-        let headers: Vec<(String, Vec<u8>)> = serde_json::from_str(&headers_json)
-            .map_err(|e| CacheError::Corrupted(e.to_string()))?;
-
-        let created = SystemTime::UNIX_EPOCH + Duration::from_secs(created_at as u64);
-        let ttl = Duration::from_secs(ttl_seconds as u64);
-        let resp = CachedResponse {
-            meta: ResponseMeta {
-                status: status as u16,
-                headers,
-            },
-            body,
-            created_at: created,
-            ttl,
-        };
-        if resp.is_expired(SystemTime::now()) {
-            return Ok(None);
+                body,
+                created_at: created,
+                ttl,
+            };
+            if resp.is_expired(SystemTime::now()) {
+                continue;
+            }
+            return Ok(Some(resp));
         }
-        Ok(Some(resp))
+        Ok(None)
     }
 
     async fn begin_store(
@@ -225,7 +252,7 @@ impl Cache for FsCache {
         key: &CacheKey,
         meta: ResponseMeta,
         default_ttl: Duration,
-        _req_headers: &roxy_cache::ReqHeaders,
+        req_headers: &roxy_cache::ReqHeaders,
     ) -> Result<Box<dyn CacheWriter>, CacheError> {
         let tmp = tmp_path(&self.cache_dir);
         if let Some(parent) = tmp.parent() {
@@ -234,6 +261,13 @@ impl Cache for FsCache {
                 .map_err(CacheError::Io)?;
         }
         let file = File::create(&tmp).await.map_err(CacheError::Io)?;
+        let vary_headers = meta
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("vary"))
+            .and_then(|(_, value)| std::str::from_utf8(value).ok())
+            .map(|s| s.to_string());
+        let vary_selector = roxy_cache::compute_selector(vary_headers.as_deref(), req_headers);
         Ok(Box::new(FsWriter {
             tmp_path: tmp,
             file: Some(file),
@@ -244,6 +278,8 @@ impl Cache for FsCache {
             ttl: default_ttl,
             cache_dir: self.cache_dir.clone(),
             conn: self.conn.clone(),
+            vary_selector,
+            vary_headers,
         }))
     }
 }
@@ -381,5 +417,131 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2)).await;
         let hit = cache.lookup(&key, &[]).await.unwrap();
         assert!(hit.is_none(), "expired entries must look like a miss");
+    }
+
+    fn req(headers: &[(&str, &[u8])]) -> Vec<(String, Vec<u8>)> {
+        headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_vec()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn vary_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
+
+        let json_req = req(&[("accept", b"application/json")]);
+        let html_req = req(&[("accept", b"text/html")]);
+
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![("vary".to_string(), b"Accept".to_vec())],
+                },
+                Duration::from_secs(60),
+                &json_req,
+            )
+            .await
+            .unwrap();
+        w.write_all(b"json-body").await.unwrap();
+        w.finish().await.unwrap();
+
+        // Same variant: hit.
+        let hit = cache.lookup(&key, &json_req).await.unwrap();
+        assert!(hit.is_some(), "matching variant must hit");
+        let body = drain_body(hit.unwrap().body).await;
+        assert_eq!(body, b"json-body");
+
+        // Different variant: miss.
+        let miss = cache.lookup(&key, &html_req).await.unwrap();
+        assert!(miss.is_none(), "different Accept value must miss");
+    }
+
+    #[tokio::test]
+    async fn two_variants_coexist() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
+        let json_req = req(&[("accept", b"application/json")]);
+        let html_req = req(&[("accept", b"text/html")]);
+
+        for (req_hdrs, body) in [
+            (&json_req, &b"json-body"[..]),
+            (&html_req, &b"html-body"[..]),
+        ] {
+            let mut w = cache
+                .begin_store(
+                    &key,
+                    ResponseMeta {
+                        status: 200,
+                        headers: vec![("vary".to_string(), b"Accept".to_vec())],
+                    },
+                    Duration::from_secs(60),
+                    req_hdrs,
+                )
+                .await
+                .unwrap();
+            w.write_all(body).await.unwrap();
+            w.finish().await.unwrap();
+        }
+
+        let json_body =
+            drain_body(cache.lookup(&key, &json_req).await.unwrap().unwrap().body).await;
+        let html_body =
+            drain_body(cache.lookup(&key, &html_req).await.unwrap().unwrap().body).await;
+        assert_eq!(json_body, b"json-body");
+        assert_eq!(html_body, b"html-body");
+    }
+
+    #[tokio::test]
+    async fn no_vary_and_vary_can_coexist_under_same_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
+
+        // No-Vary entry.
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![],
+                },
+                Duration::from_secs(60),
+                &[],
+            )
+            .await
+            .unwrap();
+        w.write_all(b"default-body").await.unwrap();
+        w.finish().await.unwrap();
+
+        // Vary entry under the same base key.
+        let json_req = req(&[("accept", b"application/json")]);
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![("vary".to_string(), b"Accept".to_vec())],
+                },
+                Duration::from_secs(60),
+                &json_req,
+            )
+            .await
+            .unwrap();
+        w.write_all(b"json-body").await.unwrap();
+        w.finish().await.unwrap();
+
+        // Request with no Accept hits the no-Vary entry.
+        let default_hit = cache.lookup(&key, &[]).await.unwrap().unwrap();
+        assert_eq!(drain_body(default_hit.body).await, b"default-body");
+
+        // Request matching the variant hits the variant.
+        let variant_hit = cache.lookup(&key, &json_req).await.unwrap().unwrap();
+        assert_eq!(drain_body(variant_hit.body).await, b"json-body");
     }
 }
