@@ -352,6 +352,37 @@ async fn spawn_fixture_with(b: FixtureBuilder) -> Fixture {
                 },
             ),
         )
+        // `/vary?mode=...` returns a body that echoes the request's Accept
+        // header and stamps a Vary response header. `mode=accept` emits
+        // `Vary: Accept`; `mode=star` emits `Vary: *`. Hit-counting includes
+        // the mode (not the Accept value) so tests can distinguish
+        // origin-reach from cache-hit.
+        .route(
+            "/vary",
+            get(
+                |State(s): State<OriginState>,
+                 Query(q): Query<HashMap<String, String>>,
+                 headers: HeaderMap| async move {
+                    let mode = q.get("mode").cloned().unwrap_or_default();
+                    s.hits.bump(&format!("/vary?mode={mode}"));
+                    let accept = headers
+                        .get(axum::http::header::ACCEPT)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let mut resp_headers = axum::http::HeaderMap::new();
+                    let vary_value = match mode.as_str() {
+                        "star" => "*",
+                        _ => "Accept",
+                    };
+                    resp_headers.insert(
+                        axum::http::header::VARY,
+                        axum::http::HeaderValue::from_static(vary_value),
+                    );
+                    (resp_headers, format!("body-for-{accept}"))
+                },
+            ),
+        )
         // `/echo-headers` returns the request headers in the body, one per
         // line. Tests use this to verify that the X-Roxy-Fingerprint header
         // is stripped before upstream forwarding.
