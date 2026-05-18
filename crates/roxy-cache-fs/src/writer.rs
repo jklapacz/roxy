@@ -23,9 +23,10 @@ pub struct FsCache {
 impl FsCache {
     pub fn open(cache_dir: impl Into<PathBuf>) -> Result<Self, CacheError> {
         let cache_dir = cache_dir.into();
-        ensure_dirs(&cache_dir).map_err(CacheError::Io)?;
-        let conn = index::open(&cache_dir.join("index.sqlite"))
+        std::fs::create_dir_all(&cache_dir).map_err(CacheError::Io)?;
+        let conn = index::open(&cache_dir.join("index.sqlite"), &cache_dir)
             .map_err(|e| CacheError::Backend(e.to_string()))?;
+        ensure_dirs(&cache_dir).map_err(CacheError::Io)?;
         Ok(Self {
             cache_dir,
             conn: Arc::new(Mutex::new(conn)),
@@ -135,10 +136,13 @@ impl CacheWriter for FsWriter {
                 .lock()
                 .map_err(|_| CacheError::Backend("index mutex poisoned".into()))?;
             conn.execute(
-                "INSERT OR REPLACE INTO entries (key, content_hash, status, headers_json, created_at, ttl_seconds)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR REPLACE INTO entries
+                   (key, vary_selector, vary_headers, content_hash, status, headers_json, created_at, ttl_seconds)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     self.key.as_bytes(),
+                    Vec::<u8>::new(),    // empty selector (real selector lands in Task 5)
+                    Option::<String>::None,
                     hash.as_slice(),
                     self.meta.status as i64,
                     headers_json,
@@ -169,8 +173,8 @@ impl Cache for FsCache {
                 .map_err(|_| CacheError::Backend("mutex".into()))?;
             conn.query_row(
                 "SELECT content_hash, status, headers_json, created_at, ttl_seconds
-                 FROM entries WHERE key = ?1",
-                [key.as_bytes()],
+                 FROM entries WHERE key = ?1 AND vary_selector = ?2",
+                rusqlite::params![key.as_bytes(), Vec::<u8>::new()],
                 |r| {
                     let content_hash: Vec<u8> = r.get(0)?;
                     let status: i64 = r.get(1)?;
