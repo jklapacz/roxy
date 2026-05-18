@@ -15,6 +15,7 @@ use std::time::Duration;
 pub struct CacheDirectives {
     pub no_store: bool,
     pub private: bool,
+    pub vary_star: bool,
     pub max_age: Option<Duration>,
 }
 
@@ -24,7 +25,7 @@ impl CacheDirectives {
     /// (multiple users share one process) so `private` responses are
     /// non-storable.
     pub fn should_cache(&self) -> bool {
-        !self.no_store && !self.private
+        !self.no_store && !self.private && !self.vary_star
     }
 
     /// TTL to use when storing this response: `max-age` if present,
@@ -45,6 +46,17 @@ pub fn parse(headers: &http::HeaderMap) -> CacheDirectives {
         };
         for raw in s.split(',') {
             apply_directive(&mut out, raw.trim());
+        }
+    }
+    for value in headers.get_all(http::header::VARY).iter() {
+        let s = match value.to_str() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        for raw in s.split(',') {
+            if raw.trim() == "*" {
+                out.vary_star = true;
+            }
         }
     }
     out
@@ -188,5 +200,44 @@ mod tests {
         let d = parse(&hdrs(&["  no-store  ,  max-age = 7  "]));
         assert!(d.no_store);
         assert_eq!(d.max_age, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn vary_star_blocks_caching() {
+        let mut h = http::HeaderMap::new();
+        h.append(http::header::VARY, http::HeaderValue::from_static("*"));
+        let d = parse(&h);
+        assert!(d.vary_star);
+        assert!(!d.should_cache());
+    }
+
+    #[test]
+    fn vary_named_header_still_cacheable() {
+        let mut h = http::HeaderMap::new();
+        h.append(http::header::VARY, http::HeaderValue::from_static("Accept"));
+        let d = parse(&h);
+        assert!(!d.vary_star);
+        assert!(d.should_cache());
+    }
+
+    #[test]
+    fn vary_star_among_named_still_blocks() {
+        let mut h = http::HeaderMap::new();
+        h.append(
+            http::header::VARY,
+            http::HeaderValue::from_static("Accept, *"),
+        );
+        let d = parse(&h);
+        assert!(d.vary_star);
+        assert!(!d.should_cache());
+    }
+
+    #[test]
+    fn vary_star_across_multiple_header_lines() {
+        let mut h = http::HeaderMap::new();
+        h.append(http::header::VARY, http::HeaderValue::from_static("Accept"));
+        h.append(http::header::VARY, http::HeaderValue::from_static(" * "));
+        let d = parse(&h);
+        assert!(d.vary_star);
     }
 }
