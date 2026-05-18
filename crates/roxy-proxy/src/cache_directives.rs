@@ -1,7 +1,9 @@
-//! Parsing of response `Cache-Control` directives that affect roxy's caching
-//! decision. Only the directives roxy currently honors are surfaced:
+//! Parsing of response `Cache-Control` directives and the `Vary` header that
+//! affect roxy's caching decision. Only the directives roxy currently honors
+//! are surfaced:
 //!
 //! - `no-store`, `private` — suppress caching entirely
+//! - `Vary: *` — suppress caching (response varies on an unrepresentable key)
 //! - `max-age=N` — override the configured default TTL
 //!
 //! Other directives (`no-cache`, `must-revalidate`, `s-maxage`, …) are
@@ -20,10 +22,11 @@ pub struct CacheDirectives {
 }
 
 impl CacheDirectives {
-    /// Whether the response may be stored at all. False if `no-store` or
-    /// `private` is present — roxy is a shared cache by construction
-    /// (multiple users share one process) so `private` responses are
-    /// non-storable.
+    /// Whether the response may be stored at all. False if `no-store`,
+    /// `private`, or `Vary: *` is present. `private` is treated as
+    /// non-storable because roxy is a shared cache by construction (multiple
+    /// users share one process). `Vary: *` is non-storable because the cache
+    /// key cannot represent an arbitrarily varying response.
     pub fn should_cache(&self) -> bool {
         !self.no_store && !self.private && !self.vary_star
     }
@@ -239,5 +242,6 @@ mod tests {
         h.append(http::header::VARY, http::HeaderValue::from_static(" * "));
         let d = parse(&h);
         assert!(d.vary_star);
+        assert!(!d.should_cache());
     }
 }
