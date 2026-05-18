@@ -16,13 +16,18 @@ use tokio::io::AsyncWrite;
 
 #[async_trait]
 pub trait Cache: Send + Sync {
-    async fn lookup(&self, key: &CacheKey) -> Result<Option<CachedResponse>, CacheError>;
+    async fn lookup(
+        &self,
+        key: &CacheKey,
+        req_headers: &vary::ReqHeaders,
+    ) -> Result<Option<CachedResponse>, CacheError>;
 
     async fn begin_store(
         &self,
         key: &CacheKey,
         meta: ResponseMeta,
         default_ttl: std::time::Duration,
+        req_headers: &vary::ReqHeaders,
     ) -> Result<Box<dyn CacheWriter>, CacheError>;
 }
 

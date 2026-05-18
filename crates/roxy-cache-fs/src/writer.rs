@@ -164,7 +164,11 @@ impl CacheWriter for FsWriter {
 
 #[async_trait]
 impl Cache for FsCache {
-    async fn lookup(&self, key: &CacheKey) -> Result<Option<CachedResponse>, CacheError> {
+    async fn lookup(
+        &self,
+        key: &CacheKey,
+        _req_headers: &roxy_cache::ReqHeaders,
+    ) -> Result<Option<CachedResponse>, CacheError> {
         use futures::StreamExt;
         let row = {
             let conn = self
@@ -221,6 +225,7 @@ impl Cache for FsCache {
         key: &CacheKey,
         meta: ResponseMeta,
         default_ttl: Duration,
+        _req_headers: &roxy_cache::ReqHeaders,
     ) -> Result<Box<dyn CacheWriter>, CacheError> {
         let tmp = tmp_path(&self.cache_dir);
         if let Some(parent) = tmp.parent() {
@@ -261,6 +266,7 @@ mod tests {
                     headers: vec![],
                 },
                 Duration::from_secs(60),
+                &[],
             )
             .await
             .unwrap();
@@ -296,6 +302,7 @@ mod tests {
                     headers: vec![],
                 },
                 Duration::from_secs(60),
+                &[],
             )
             .await
             .unwrap();
@@ -337,13 +344,14 @@ mod tests {
                     headers: vec![("x".to_string(), b"y".to_vec())],
                 },
                 Duration::from_secs(60),
+                &[],
             )
             .await
             .unwrap();
         w.write_all(b"payload").await.unwrap();
         w.finish().await.unwrap();
 
-        let hit = cache.lookup(&key).await.unwrap().unwrap();
+        let hit = cache.lookup(&key, &[]).await.unwrap().unwrap();
         assert_eq!(hit.meta.status, 200);
         assert_eq!(hit.meta.headers, vec![("x".to_string(), b"y".to_vec())]);
         let bytes = drain_body(hit.body).await;
@@ -363,6 +371,7 @@ mod tests {
                     headers: vec![],
                 },
                 Duration::from_secs(0),
+                &[],
             )
             .await
             .unwrap();
@@ -370,7 +379,7 @@ mod tests {
         w.finish().await.unwrap();
         // Sleep 1ms to guarantee elapsed > 0.
         tokio::time::sleep(Duration::from_millis(2)).await;
-        let hit = cache.lookup(&key).await.unwrap();
+        let hit = cache.lookup(&key, &[]).await.unwrap();
         assert!(hit.is_none(), "expired entries must look like a miss");
     }
 }

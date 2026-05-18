@@ -106,7 +106,7 @@ impl<C: Cache + 'static> Handler<C> {
         //    emits is part of the core flow even when caching is disabled.
         let key = build_cache_key_and_warn(&req, &label, scheme, &authority);
         if self.cache_enabled {
-            if let Ok(Some(hit)) = self.cache.lookup(&key).await {
+            if let Ok(Some(hit)) = self.cache.lookup(&key, &[]).await {
                 return Ok(reply_from_cache(hit));
             }
         }
@@ -159,7 +159,7 @@ impl<C: Cache + 'static> Handler<C> {
                 headers: header_pairs(&resp_parts.headers),
             };
             let ttl = directives.effective_ttl(self.default_ttl);
-            match self.cache.begin_store(&key, meta, ttl).await {
+            match self.cache.begin_store(&key, meta, ttl, &[]).await {
                 Ok(w) => Some(w),
                 Err(e) => {
                     tracing::warn!(error = %e, "begin_store failed - pass-through");
