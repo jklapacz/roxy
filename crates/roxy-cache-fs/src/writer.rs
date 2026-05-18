@@ -220,7 +220,17 @@ impl Cache for FsCache {
             }
             let hex = hex::encode(&content_hash);
             let path = blob_path(&self.cache_dir, &hex);
-            let file = tokio::fs::File::open(&path).await.map_err(CacheError::Io)?;
+            let file = match tokio::fs::File::open(&path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "cache blob missing or unreadable - skipping candidate"
+                    );
+                    continue;
+                }
+            };
             let reader = tokio_util::io::ReaderStream::new(file);
             let body: futures::stream::BoxStream<'static, Result<bytes::Bytes, std::io::Error>> =
                 reader.boxed();
@@ -261,12 +271,17 @@ impl Cache for FsCache {
                 .map_err(CacheError::Io)?;
         }
         let file = File::create(&tmp).await.map_err(CacheError::Io)?;
-        let vary_headers = meta
+        let vary_parts: Vec<String> = meta
             .headers
             .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case("vary"))
-            .and_then(|(_, value)| std::str::from_utf8(value).ok())
-            .map(|s| s.to_string());
+            .filter(|(name, _)| name.eq_ignore_ascii_case("vary"))
+            .filter_map(|(_, value)| std::str::from_utf8(value).ok().map(|s| s.to_string()))
+            .collect();
+        let vary_headers = if vary_parts.is_empty() {
+            None
+        } else {
+            Some(vary_parts.join(", "))
+        };
         let vary_selector = roxy_cache::compute_selector(vary_headers.as_deref(), req_headers);
         Ok(Box::new(FsWriter {
             tmp_path: tmp,
@@ -543,5 +558,82 @@ mod tests {
         // Request matching the variant hits the variant.
         let variant_hit = cache.lookup(&key, &json_req).await.unwrap().unwrap();
         assert_eq!(drain_body(variant_hit.body).await, b"json-body");
+    }
+
+    #[tokio::test]
+    async fn multiple_vary_headers_concatenate() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
+
+        let req_a = req(&[
+            ("accept", b"application/json"),
+            ("accept-encoding", b"gzip"),
+        ]);
+        let req_b = req(&[("accept", b"application/json"), ("accept-encoding", b"br")]);
+
+        // Two Vary header lines: Accept on one, Accept-Encoding on another.
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![
+                        ("vary".to_string(), b"Accept".to_vec()),
+                        ("vary".to_string(), b"Accept-Encoding".to_vec()),
+                    ],
+                },
+                Duration::from_secs(60),
+                &req_a,
+            )
+            .await
+            .unwrap();
+        w.write_all(b"a-body").await.unwrap();
+        w.finish().await.unwrap();
+
+        // Same Accept-Encoding => hit.
+        let hit_a = cache.lookup(&key, &req_a).await.unwrap();
+        assert!(
+            hit_a.is_some(),
+            "same Accept + same Accept-Encoding must hit"
+        );
+
+        // Different Accept-Encoding => miss (both header lines contribute).
+        let miss_b = cache.lookup(&key, &req_b).await.unwrap();
+        assert!(miss_b.is_none(), "different Accept-Encoding must miss");
+    }
+
+    #[tokio::test]
+    async fn missing_blob_skips_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = FsCache::open(dir.path()).unwrap();
+        let key = CacheKey::from_parts("_default", "GET", "https", "x.y", "/p", None);
+
+        let mut w = cache
+            .begin_store(
+                &key,
+                ResponseMeta {
+                    status: 200,
+                    headers: vec![],
+                },
+                Duration::from_secs(60),
+                &[],
+            )
+            .await
+            .unwrap();
+        w.write_all(b"body").await.unwrap();
+        w.finish().await.unwrap();
+
+        // Nuke the blob directory.
+        let _ = std::fs::remove_dir_all(dir.path().join("blobs"));
+
+        // Lookup must return Ok(None), not Err — the missing blob is treated
+        // as a corruption signal, not a fatal error.
+        let result = cache.lookup(&key, &[]).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "missing blob should be skipped, got {:?}",
+            result.map(|opt| opt.is_some())
+        );
     }
 }
