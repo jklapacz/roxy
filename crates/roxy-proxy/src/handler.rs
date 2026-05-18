@@ -105,8 +105,16 @@ impl<C: Cache + 'static> Handler<C> {
         // 3. Cache key. Built unconditionally — the host-mismatch warning it
         //    emits is part of the core flow even when caching is disabled.
         let key = build_cache_key_and_warn(&req, &label, scheme, &authority);
+        let req_headers: Vec<(String, Vec<u8>)> = if self.cache_enabled {
+            req.headers()
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.as_bytes().to_vec()))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if self.cache_enabled {
-            if let Ok(Some(hit)) = self.cache.lookup(&key, &[]).await {
+            if let Ok(Some(hit)) = self.cache.lookup(&key, &req_headers).await {
                 return Ok(reply_from_cache(hit));
             }
         }
@@ -159,7 +167,7 @@ impl<C: Cache + 'static> Handler<C> {
                 headers: header_pairs(&resp_parts.headers),
             };
             let ttl = directives.effective_ttl(self.default_ttl);
-            match self.cache.begin_store(&key, meta, ttl, &[]).await {
+            match self.cache.begin_store(&key, meta, ttl, &req_headers).await {
                 Ok(w) => Some(w),
                 Err(e) => {
                     tracing::warn!(error = %e, "begin_store failed - pass-through");
