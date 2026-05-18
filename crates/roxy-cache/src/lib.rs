@@ -3,10 +3,12 @@
 mod error;
 mod key;
 mod response;
+mod vary;
 
 pub use error::CacheError;
 pub use key::CacheKey;
 pub use response::{CachedResponse, ResponseMeta};
+pub use vary::{compute_selector, ReqHeaders};
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;

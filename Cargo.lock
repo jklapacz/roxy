@@ -1958,6 +1958,7 @@ dependencies = [
  "bytes",
  "futures",
  "http",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "url",
